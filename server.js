@@ -6,7 +6,7 @@ require("dotenv").config();
 const app = express();
 app.use(express.json());
 
-// ✅ بيئة من ملف .env
+// ✅ متغيرات البيئة
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -23,11 +23,11 @@ app.post("/webhook", async (req, res) => {
     }
 
     const from = data.data.from;   // رقم العميل
-    const message = data.data.message; // رسالة العميل
+    const message = data.data.message; // نص الرسالة
 
     console.log(`📩 رسالة من ${from}: ${message}`);
 
-    // ✨ الرد من ChatGPT (مع منتجات Shopify)
+    // ✨ الرد من ChatGPT
     const gptReply = await askChatGPT(message);
 
     // ✨ إرسال الرد للعميل
@@ -39,6 +39,7 @@ app.post("/webhook", async (req, res) => {
     res.sendStatus(500);
   }
 });
+
 
 // ✅ جلب المنتجات من Shopify
 async function getShopifyProducts() {
@@ -59,15 +60,103 @@ async function getShopifyProducts() {
       url: `https://${SHOPIFY_STORE_URL.replace("https://", "").replace("http://", "")}/products/${p.handle}`
     }));
   } catch (err) {
-    console.error("❌ Shopify error:", err.response?.data || err.message);
+    console.error("❌ Shopify products error:", err.response?.data || err.message);
     return [];
   }
 }
 
-// ✅ طلب من ChatGPT مع سياق المتجر
+// ✅ جلب السياسات
+async function getShopifyPolicies() {
+  try {
+    const response = await axios.get(
+      `${SHOPIFY_STORE_URL}/admin/api/2024-07/policies.json`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    return response.data.policies.map(p => ({
+      title: p.title,
+      body: p.body
+    }));
+  } catch (err) {
+    console.error("❌ Shopify policies error:", err.response?.data || err.message);
+    return [];
+  }
+}
+
+// ✅ جلب الصفحات
+async function getShopifyPages() {
+  try {
+    const response = await axios.get(
+      `${SHOPIFY_STORE_URL}/admin/api/2024-07/pages.json?limit=5`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    return response.data.pages.map(p => ({
+      title: p.title,
+      body: p.body_html.replace(/<[^>]+>/g, "").slice(0, 300) // نص مختصر
+    }));
+  } catch (err) {
+    console.error("❌ Shopify pages error:", err.response?.data || err.message);
+    return [];
+  }
+}
+
+// ✅ جلب القوائم
+async function getShopifyNavigation() {
+  try {
+    const response = await axios.get(
+      `${SHOPIFY_STORE_URL}/admin/api/2024-07/menus.json`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    return response.data.menus.map(m => ({
+      title: m.title,
+      items: m.items.map(i => i.title).join(", ")
+    }));
+  } catch (err) {
+    console.error("❌ Shopify navigation error:", err.response?.data || err.message);
+    return [];
+  }
+}
+
+// ✅ طلب من ChatGPT مع سياق كامل من المتجر
 async function askChatGPT(userMessage) {
   try {
-    const products = await getShopifyProducts();
+    const [products, policies, pages, menus] = await Promise.all([
+      getShopifyProducts(),
+      getShopifyPolicies(),
+      getShopifyPages(),
+      getShopifyNavigation()
+    ]);
+
+    const context = `
+🛒 المنتجات:
+${products.map(p => `- ${p.title}: ${p.price} OMR (${p.url})`).join("\n")}
+
+📜 السياسات:
+${policies.map(p => `- ${p.title}: ${p.body.slice(0, 150)}...`).join("\n")}
+
+📄 الصفحات:
+${pages.map(p => `- ${p.title}: ${p.body}`).join("\n")}
+
+📂 الأقسام:
+${menus.map(m => `- ${m.title}: ${m.items}`).join("\n")}
+`;
 
     const response = await axios.post(
       "https://api.openai.com/v1/chat/completions",
@@ -78,23 +167,13 @@ async function askChatGPT(userMessage) {
             role: "system",
             content: `
 أنت مساعد دردشة لمتجر eSelect | إي سيلكت.
-تجاوب بسرعة واحترافية باللهجة العمانية (أو العربية الفصحى عند الحاجة).
-مهمتك:
-- تشرح للعميل المنتجات والأسعار بشكل مبسط.
-- تذكر روابط المنتجات عند الحاجة.
-- تعطي معلومات عن الدفع عند الاستلام، التحويل البنكي، باي بال.
-- توضح سياسات الشحن والإرجاع حسب ما هو في الموقع.
-- تعيد صياغة الردود بشكل ودّي وواضح.
+- تجاوب بسرعة واحترافية باللهجة العمانية أو العربية الفصحى.
+- تعطي معلومات دقيقة عن المنتجات والأسعار والسياسات.
+- لو العميل يسأل شيء حساس (زي معلومات شخصية أو مالية)، تجاوب بأدب أنك ما تقدر تعطيه.
+- اجعل ردودك ودية، قصيرة وواضحة.
 `
           },
-          {
-            role: "user",
-            content: `
-رسالة العميل: ${userMessage}
-قائمة أحدث المنتجات:
-${products.map(p => `- ${p.title}: ${p.price} OMR (${p.url})`).join("\n")}
-`
-          }
+          { role: "user", content: `رسالة العميل: ${userMessage}\n\nمحتوى المتجر:\n${context}` }
         ],
       },
       {
@@ -107,7 +186,7 @@ ${products.map(p => `- ${p.title}: ${p.price} OMR (${p.url})`).join("\n")}
 
     return response.data.choices[0].message.content;
   } catch (err) {
-    console.error("❌ Error from ChatGPT:", err.response?.data || err.message);
+    console.error("❌ ChatGPT error:", err.response?.data || err.message);
     return "عذرًا، صار خطأ مؤقت. حاول مرة ثانية 🙏";
   }
 }
