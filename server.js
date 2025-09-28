@@ -9,9 +9,11 @@ app.get("/", (req, res) => {
   res.send("🚀 WhatsApp bot is running");
 });
 
-// ✅ استقبال أي Webhook وطباعة محتواه
+// ✅ تسجيل أي Webhook يوصل
 app.post("/webhook", (req, res) => {
-  console.log("📩 Webhook received:", req.body);
+  console.log("📩 Headers:", req.headers);
+  console.log("📩 Body:", req.body);
+
   res.sendStatus(200);
 });
 
