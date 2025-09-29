@@ -1,92 +1,49 @@
-const express = require("express");
-const axios = require("axios");
-require("dotenv").config();
+// 📌 استدعاء المكتبات
+import express from "express";
+import axios from "axios";
+import bodyParser from "body-parser";
+import dotenv from "dotenv";
+import OpenAI from "openai";
+
+dotenv.config();
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(bodyParser.json());
 
-// ================== ENV VARS ==================
-const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
-const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
+// 📌 متغيرات البيئة (من Render Dashboard أو ملف .env)
+const PORT = process.env.PORT || 10000;
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE; // رابط المتجر
+const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN; // API Access Token
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL; // https://xxxx.myshopify.com
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 
-// ================== TEST ROUTE ==================
-app.get("/", (req, res) => {
-  res.send("🚀 WhatsApp bot is running - eSelect | إي سيلكت");
-});
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// ================== WEBHOOK ==================
-app.post("/webhook", async (req, res) => {
-  try {
-    const body = req.body;
+// ================
+// 🔎 كشف النية Intent Detection
+// ================
+function detectIntent(message) {
+  const text = message.toLowerCase();
 
-    if (!body || !body.data || !body.data.body) {
-      console.log("❌ Webhook بدون رسالة:", body);
-      return res.sendStatus(200);
-    }
+  if (text.includes("طلب") || text.includes("رقم الطلب")) return "order_status";
+  if (text.includes("منتج") || text.includes("سعر") || text.includes("كم")) return "product_info";
+  if (text.includes("سياسة") || text.includes("ارجاع") || text.includes("استبدال")) return "policy";
+  if (text.includes("دفع") || text.includes("المبلغ")) return "payment_status";
 
-    const from = body.data.from.replace("@c.us", ""); // رقم العميل
-    const message = body.data.body.trim(); // نص الرسالة
-
-    console.log(`📩 رسالة من ${from}: ${message}`);
-
-    // ✅ ردود سريعة على التحيات
-    const quickReply = handleQuickReplies(message);
-    if (quickReply) {
-      await sendWhatsAppMessage(from, quickReply);
-      return res.sendStatus(200);
-    }
-
-    // ✨ الرد من ChatGPT + Shopify
-    const gptReply = await askChatGPT(message, from);
-    await sendWhatsAppMessage(from, gptReply);
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Error in webhook:", err.message);
-    res.sendStatus(500);
-  }
-});
-
-// ================== QUICK REPLIES ==================
-function handleQuickReplies(msg) {
-  const normalized = msg.toLowerCase();
-
-  const greetings = ["مرحبا", "مرحبا", "اهلا", "هلا", "hi", "hello"];
-  const salam = ["السلام عليكم", "سلام عليكم", "السلام", "سلام"];
-
-  if (greetings.includes(normalized)) {
-    return "أهلاً وسهلاً 👋، كيف أقدر أخدمك اليوم؟";
-  }
-  if (salam.includes(normalized)) {
-    return "وعليكم السلام ورحمة الله وبركاته 🌹، تفضل كيف أقدر أساعدك؟";
-  }
-
-  return null; // يرسل للـ ChatGPT لو مش موجود هنا
+  return "general";
 }
 
-// ================== SHOPIFY HELPERS ==================
+// ================
+// 🛒 دوال لجلب البيانات من Shopify
+// ================
 async function getShopifyProducts() {
   try {
-    const response = await axios.get(
-      `${SHOPIFY_STORE_URL}/admin/api/2024-07/products.json?limit=5`,
+    const res = await axios.get(
+      `https://${SHOPIFY_STORE}/admin/api/2024-10/products.json?limit=5`,
       {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-          "Content-Type": "application/json",
-        },
+        headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN },
       }
     );
-
-    return response.data.products.map(p => ({
-      title: p.title,
-      price: p.variants[0]?.price,
-      stock: p.variants[0]?.inventory_quantity,
-      url: `https://${SHOPIFY_STORE_URL.replace("https://", "").replace("http://", "")}/products/${p.handle}`
-    }));
+    return res.data.products || [];
   } catch (err) {
     console.error("❌ Shopify products error:", err.response?.data || err.message);
     return [];
@@ -94,148 +51,119 @@ async function getShopifyProducts() {
 }
 
 async function getShopifyPolicies() {
-  try {
-    const response = await axios.get(
-      `${SHOPIFY_STORE_URL}/admin/api/2024-07/policies.json`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    return response.data.policies.map(p => ({
-      title: p.title,
-      body: p.body.slice(0, 200)
-    }));
-  } catch (err) {
-    console.error("❌ Shopify policies error:", err.response?.data || err.message);
-    return [];
-  }
+  return `
+1. 📜 الإرجاع: خلال 14 يوم مع الشروط.
+2. 🚚 الشحن: توصيل سريع وآمن.
+3. 🔒 الخصوصية: حماية بيانات العملاء.`;
 }
 
-async function getShopifyPages() {
+async function getOrderFromShopify(orderId) {
   try {
-    const response = await axios.get(
-      `${SHOPIFY_STORE_URL}/admin/api/2024-07/pages.json?limit=3`,
+    const res = await axios.get(
+      `https://${SHOPIFY_STORE}/admin/api/2024-10/orders/${orderId}.json`,
       {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-          "Content-Type": "application/json",
-        },
+        headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN },
       }
     );
-
-    return response.data.pages.map(p => ({
-      title: p.title,
-      body: p.body_html.replace(/<[^>]+>/g, "").slice(0, 200)
-    }));
-  } catch (err) {
-    console.error("❌ Shopify pages error:", err.response?.data || err.message);
-    return [];
-  }
-}
-
-async function getOrderStatus(orderId) {
-  try {
-    const response = await axios.get(
-      `${SHOPIFY_STORE_URL}/admin/api/2024-07/orders/${orderId}.json`,
-      {
-        headers: {
-          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    const order = response.data.order;
-    return `📦 حالة طلبك #${order.id}: ${order.fulfillment_status || "قيد المعالجة"} | الدفع: ${order.financial_status}`;
+    return res.data.order;
   } catch (err) {
     console.error("❌ Shopify order error:", err.response?.data || err.message);
-    return "لم أتمكن من العثور على تفاصيل الطلب، تأكد من رقم الطلب.";
+    return null;
   }
 }
 
-// ================== CHATGPT ==================
-async function askChatGPT(userMessage, userNumber) {
-  try {
-    const [products, policies, pages] = await Promise.all([
-      getShopifyProducts(),
-      getShopifyPolicies(),
-      getShopifyPages()
-    ]);
-
-    // لو فيه رقم طلب
-    let orderReply = "";
-    const orderIdMatch = userMessage.match(/\d{6,}/);
-    if (orderIdMatch) {
-      orderReply = await getOrderStatus(orderIdMatch[0]);
-    }
-
-    const context = `
-🛒 المنتجات:
-${products.map(p => `- ${p.title}: ${p.price} OMR | المخزون: ${p.stock} | ${p.url}`).join("\n")}
-
-📜 السياسات:
-${policies.map(p => `- ${p.title}: ${p.body}...`).join("\n")}
-
-📄 الصفحات:
-${pages.map(p => `- ${p.title}: ${p.body}`).join("\n")}
-
-${orderReply ? `\n🔎 حالة الطلب:\n${orderReply}` : ""}
-`;
-
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `
-أنت موظف خدمة عملاء افتراضي لمتجر eSelect | إي سيلكت.
-- رد بذكاء واحترافية كأنك موظف بشري.
-- رحّب بالعميل بطريقة ودودة باللهجة العمانية أو العربية الفصحى.
-- إذا كان السؤال تحية فقط → رد بتحية مناسبة.
-- إذا كان عن المنتجات أو الأسعار أو السياسات → اعتمد على البيانات المرفقة.
-- إذا كان عن الطلبات → اعرض حالة الطلب بوضوح.
-- اجعل الردود قصيرة، واضحة، وتركز على ما طلبه العميل فقط.
-`
-          },
-          { role: "user", content: `رسالة العميل: ${userMessage}\n\nبيانات المتجر:\n${context}` }
-        ],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    return response.data.choices[0].message.content;
-  } catch (err) {
-    console.error("❌ ChatGPT error:", err.response?.data || err.message);
-    return "عذرًا، صار خطأ مؤقت. حاول مرة ثانية 🙏";
-  }
+async function getPaymentStatus(orderId) {
+  const order = await getOrderFromShopify(orderId);
+  if (!order) return "لم أجد تفاصيل الطلب.";
+  return `💳 حالة الدفع: ${order.financial_status}, المبلغ الكلي: ${order.total_price} ${order.currency}`;
 }
 
-// ================== ULTRAMSG ==================
-async function sendWhatsAppMessage(to, text) {
+// ================
+// 🤖 بناء السياق قبل إرسال لـ ChatGPT
+// ================
+async function buildContext(intent, message, customerId) {
+  let context = "أنت موظف خدمة عملاء لمتجر eSelect | إي سيلكت. رد باللهجة العمانية الودودة واحترافية.";
+
+  if (intent === "order_status") {
+    context += "\nالعميل يسأل عن حالة طلب.";
+  }
+  if (intent === "product_info") {
+    const products = await getShopifyProducts();
+    context += `\n🛒 منتجات مختصرة:\n${products
+      .map((p) => `- ${p.title} بسعر ${p.variants[0].price} OMR`)
+      .join("\n")}`;
+  }
+  if (intent === "policy") {
+    const policies = await getShopifyPolicies();
+    context += `\n📜 سياسات المتجر:\n${policies}`;
+  }
+  if (intent === "payment_status") {
+    context += "\nالعميل يسأل عن حالة الدفع أو المبلغ.";
+  }
+  if (intent === "general") {
+    context += `
+العميل يريد دردشة أو سؤال عام. جاوب بشكل ودود لكن لا تخرج كثير عن دور خدمة العملاء. 
+إذا سأل عن السياسة أو الدين أو موضوع بعيد قول له: "أنا مختص فقط بخدمة العملاء والمتجر".`;
+  }
+
+  return context;
+}
+
+// ================
+// 🤖 طلب من ChatGPT
+// ================
+async function askChatGPT(userMessage, intent, customerId) {
+  const context = await buildContext(intent, userMessage, customerId);
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: context },
+      { role: "user", content: userMessage },
+    ],
+    max_tokens: 400,
+    temperature: 0.7,
+  });
+
+  return response.choices[0].message.content;
+}
+
+// ================
+// 📩 Webhook استقبال رسائل WhatsApp
+// ================
+app.post("/webhook", async (req, res) => {
   try {
-    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
-    await axios.post(url, {
-      token: ULTRAMSG_TOKEN,
-      to,
-      body: text,
+    const body = req.body;
+    const msg = body.data?.body || "";
+    const from = body.data?.from || "unknown";
+
+    console.log(`📩 رسالة من ${from}: ${msg}`);
+
+    // 1. كشف النية
+    const intent = detectIntent(msg);
+
+    // 2. الرد المناسب
+    const reply = await askChatGPT(msg, intent, from);
+
+    // 3. إرسال الرد عبر API الواتساب
+    await axios.post("https://api.ultramsg.com/YOUR_INSTANCE/messages/chat", {
+      token: process.env.WHATSAPP_TOKEN,
+      to: from.replace("@c.us", ""),
+      body: reply,
     });
-    console.log(`✅ أُرسلت رسالة إلى ${to}: ${text}`);
-  } catch (err) {
-    console.error("❌ Error sending WhatsApp message:", err.response?.data || err.message);
-  }
-}
 
-// ================== START ==================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Bot running on port ${PORT}`));
+    console.log(`✅ أُرسلت رسالة إلى ${from}: ${reply}`);
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Webhook error:", err.message);
+    res.sendStatus(500);
+  }
+});
+
+// ================
+// 🚀 تشغيل السيرفر
+// ================
+app.listen(PORT, () => {
+  console.log(`🚀 Bot running on port ${PORT}`);
+});
