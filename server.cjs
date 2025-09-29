@@ -114,6 +114,5 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Bot running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Bot running on port ${PORT}`));
