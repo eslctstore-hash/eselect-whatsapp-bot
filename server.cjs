@@ -29,6 +29,18 @@ const sessions = {};
 // ==========================
 async function sendMessage(to, body) {
   try {
+    if (typeof body !== "string") {
+      body = String(body);
+    }
+
+    // قص الرسالة لو طويلة
+    if (body.length > 9500) {
+      console.warn("⚠️ Message too long, trimming...");
+      body = body.substring(0, 9500) + "…";
+    }
+
+    console.log("➡️ Sending to", to, ":", body);
+
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE}/messages/chat`;
     const res = await axios.post(url, {
       token: ULTRAMSG_TOKEN,
