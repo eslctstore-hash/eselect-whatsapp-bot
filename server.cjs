@@ -1,128 +1,128 @@
-const express = require("express");
-const axios = require("axios");
-require("dotenv").config();
+// server.cjs
+
+import express from "express";
+import axios from "axios";
+import bodyParser from "body-parser";
 
 const app = express();
-app.use(express.json());
+app.use(bodyParser.json());
 
-const ULTRAMSG_API = `https://api.ultramsg.com/${process.env.ULTRAMSG_INSTANCE_ID}`;
+// ==========================
+// إعداد المتغيرات
+// ==========================
+const ULTRAMSG_INSTANCE = process.env.ULTRAMSG_INSTANCE;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
-const SHOPIFY_API = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2025-01`;
-const SHOPIFY_TOKEN = process.env.SHOPIFY_API_TOKEN;
 
-// ذاكرة الجلسة
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE; // مثال: eselect.store
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+const SHOPIFY_PASSWORD = process.env.SHOPIFY_PASSWORD;
+
+const SUPPORT_NUMBER = "96894682186"; // رقم الدعم (واتساب)
+
+// ==========================
+// تخزين الجلسات
+// ==========================
 const sessions = {};
 
-// 📨 إرسال رسالة
+// ==========================
+// إرسال رسالة واتساب
+// ==========================
 async function sendMessage(to, body) {
   try {
-    await axios.post(`${ULTRAMSG_API}/messages/chat`, {
+    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE}/messages/chat`;
+    const res = await axios.post(url, {
       token: ULTRAMSG_TOKEN,
       to,
       body,
     });
+    console.log("✅ Sent via Ultramsg:", res.data);
   } catch (err) {
-    console.error("❌ Error sending message:", err.response?.data || err.message);
+    console.error("❌ Send error:", err.response?.data || err.message);
   }
 }
 
-// 📦 جلب منتج من Shopify
-async function getProductByName(query) {
+// ==========================
+// جلب الطلب من Shopify
+// ==========================
+async function fetchOrder(orderId) {
   try {
-    const res = await axios.get(`${SHOPIFY_API}/products.json?title=${encodeURIComponent(query)}`, {
-      headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN }
-    });
-    if (res.data.products.length === 0) return null;
-    return res.data.products[0];
+    const url = `https://${SHOPIFY_API_KEY}:${SHOPIFY_PASSWORD}@${SHOPIFY_STORE}/admin/api/2025-01/orders/${orderId}.json`;
+    const res = await axios.get(url);
+    return res.data.order;
   } catch (err) {
-    console.error("❌ Shopify fetch error:", err.message);
+    console.error("❌ Shopify fetch error:", err.response?.data || err.message);
     return null;
   }
 }
 
-// 🧠 معالجة الرسائل
-async function handleMessage(from, body) {
-  const now = Date.now();
-
-  // تهيئة جلسة العميل
+// ==========================
+// معالجة الرسائل
+// ==========================
+async function handleMessage(from, text) {
   if (!sessions[from]) {
-    sessions[from] = {
-      lastGreet: false,
-      lastTransfer: 0,
-    };
-  }
-
-  const session = sessions[from];
-
-  // ⏱️ إذا المحادثة محولة للموظف (إيقاف ساعة)
-  if (now - session.lastTransfer < 60 * 60 * 1000) {
-    console.log("⏸️ Session paused for", from);
-    return;
-  }
-
-  // 👋 رسالة الترحيب (مره وحده فقط)
-  if (!session.lastGreet) {
+    sessions[from] = { human: false, lastOrder: null };
     await sendMessage(from, "👋 أهلاً بك في eSelect | إي سيلكت!\nكيف أقدر أساعدك اليوم بخصوص المنتجات أو الطلبات؟");
-    session.lastGreet = true;
     return;
   }
 
-  const lower = body.toLowerCase();
-
-  // 👨‍💼 تحويل للموظف
-  if (/موظف|شخص|حقيقي|بشر/.test(body)) {
-    await sendMessage(from, "📞 تم تحويلك إلى موظف خدمة العملاء، يرجى الانتظار لحين الرد من المختص.");
-    session.lastTransfer = now;
-    return;
-  }
-
-  // 📦 استفسار عن الطلب
-  if (/طلب|طلبي/.test(body)) {
-    await sendMessage(from, "📦 يرجى تزويدنا برقم الطلب حتى نتمكن من خدمتك بشكل أدق.");
-    return;
-  }
-
-  // 🚚 استفسار عن التوصيل
-  if (/متى توصل|التوصيل|الشحن/.test(body)) {
-    await sendMessage(from, "🚚 عادة التوصيل يستغرق من 1 إلى 3 أيام عمل داخل سلطنة عمان.");
-    return;
-  }
-
-  // 🔎 البحث عن منتج
-  if (/كم|سعر|توفر|متوفر|منتج/.test(body)) {
-    const product = await getProductByName(body);
-    if (product) {
-      const price = product.variants[0]?.price || "غير محدد";
-      await sendMessage(from, `✅ المنتج متوفر: ${product.title}\n💰 السعر: ${price} ريال عماني`);
-    } else {
-      await sendMessage(from, "❌ عذرًا المنتج غير متوفر حاليًا.");
+  // إذا العميل طلب محادثة موظف
+  if (/(موظف|شخص|احد|بشر|الحقيقي|خدمة)/i.test(text)) {
+    if (!sessions[from].human) {
+      sessions[from].human = true;
+      await sendMessage(from, "👨‍💼 تم تحويلك إلى أحد موظفينا المختصين، يرجى الانتظار لحين الرد عليك من قبل الموظف.");
     }
     return;
   }
 
-  // ❓ أي شيء آخر
-  await sendMessage(from, "❓ لم أتمكن من فهم استفسارك. يرجى الانتظار لحين الرد عليك من الموظف المختص.");
+  // 🔹 التحقق من الاستفسار عن طلب
+  if (/(طلب|طلبي|طلبيتي|طلبتي|طلبياتي|طلبية|طلباتي|اوردري|اوردر|اوردراتي|أوردري|أوردراتي)/i.test(text)) {
+    const match = text.match(/\d{3,6}/); // رقم من 3 إلى 6 خانات
+    if (match) {
+      const orderId = match[0];
+      sessions[from].lastOrder = orderId;
+
+      await sendMessage(from, `📦 تم استلام رقم الطلب: ${orderId}\nيرجى الانتظار، وسيتم التحقق من حالة طلبك.`);
+
+      const order = await fetchOrder(orderId);
+      if (order) {
+        await sendMessage(
+          from,
+          `✅ تفاصيل الطلب #${orderId}:\n👤 العميل: ${order.customer?.first_name || "غير معروف"}\n💵 الإجمالي: ${order.total_price} ${order.currency}\n📌 الحالة: ${order.fulfillment_status || "قيد المعالجة"}`
+        );
+      } else {
+        await sendMessage(from, `⚠️ لم أتمكن من العثور على تفاصيل الطلب رقم ${orderId}. يرجى التأكد من الرقم.`);
+      }
+      return;
+    } else {
+      await sendMessage(from, "ℹ️ يرجى تزويدي برقم الطلب للتحقق.");
+      return;
+    }
+  }
+
+  // 🔹 الردود العامة (إذا لم يفهم)
+  if (!sessions[from].human) {
+    await sendMessage(from, "⚠️ عذرًا، لم أفهم استفسارك.\nيرجى توضيح طلبك بشكل أدق (مثل: طلبيتي 1139).");
+  }
 }
 
-// 📩 استقبال Webhook من Ultramsg
+// ==========================
+// Webhook من Ultramsg
+// ==========================
 app.post("/webhook", async (req, res) => {
-  try {
-    const data = req.body;
-    if (data.event_type === "message_received" && data.data?.fromMe === false) {
-      const from = data.data.from;
-      const body = data.data.body?.trim() || "";
-      if (body) {
-        console.log("📩 رسالة جديدة من", from, ":", body);
-        await handleMessage(from, body);
-      }
-    }
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Webhook error:", err.message);
-    res.sendStatus(500);
+  const data = req.body;
+  if (data?.data?.from && data?.data?.body) {
+    const from = data.data.from.replace("@c.us", "");
+    const text = data.data.body.trim();
+    console.log("📩 رسالة جديدة من", from, ":", text);
+    await handleMessage(from, text);
   }
+  res.sendStatus(200);
 });
 
-// 🚀 بدء السيرفر
+// ==========================
+// تشغيل السيرفر
+// ==========================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 WhatsApp bot running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 WhatsApp bot running on port ${PORT}`);
+});
