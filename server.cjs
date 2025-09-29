@@ -6,22 +6,21 @@ require("dotenv").config();
 const app = express();
 app.use(bodyParser.json());
 
-// =============== المتغيرات من البيئة ===============
+// =============== المتغيرات ===============
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL; // مثال: https://eselect.myshopify.com
+const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
-const SUPPORT_PHONE = process.env.SUPPORT_PHONE || "+968XXXXXXXX"; // رقم الدعم
+const SUPPORT_PHONE = process.env.SUPPORT_PHONE || "96894682186"; // رقم الدعم الافتراضي
 
 // =============== ذاكرة مؤقتة ===============
 const conversationCache = new Map();
-const humanOverride = new Map();
-const failedAttempts = new Map();
+const humanOverride = new Map(); // userId => until timestamp
 
 // =============== وظائف مساعدة ===============
 function normalizePhone(phone) {
-  return phone.replace(/^968/, "").replace(/\D/g, ""); // يحذف 968 ورموز
+  return phone.replace(/^968/, "").replace(/\D/g, "");
 }
 
 function isHumanRequest(text) {
@@ -37,17 +36,16 @@ function isHumanRequest(text) {
   return keywords.some(rx => rx.test(text));
 }
 
-// التحقق إذا كان العميل تحت وضع الموظف
 function isInHumanOverride(userId) {
   const until = humanOverride.get(userId);
   return until && Date.now() < until;
 }
 
-// جلب الطلبات من Shopify عبر رقم الهاتف
+// جلب الطلبات من Shopify
 async function getCustomerOrdersByPhone(phone) {
   try {
     const cleanPhone = normalizePhone(phone);
-    const url = `${SHOPIFY_STORE_URL}/admin/api/2023-10/orders.json?status=any&fields=id,phone,customer,financial_status,fulfillment_status,order_number,total_price,current_total_price,shipping_address,note,created_at`;
+    const url = `${SHOPIFY_STORE_URL}/admin/api/2023-10/orders.json?status=any&fields=id,phone,order_number,financial_status,fulfillment_status,total_price,note`;
     const res = await axios.get(url, {
       headers: {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
@@ -66,113 +64,78 @@ async function getCustomerOrdersByPhone(phone) {
 async function sendWhatsAppMessage(to, message) {
   try {
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
-    const res = await axios.post(url, {
+    await axios.post(url, {
       token: ULTRAMSG_TOKEN,
       to,
       body: message
     });
-    console.log("✅ Sent via Ultramsg:", {
-      to,
-      ok: true,
-      replyPreview: message.slice(0, 50)
-    });
+    console.log("✅ Sent:", message.slice(0, 50));
   } catch (err) {
-    console.error("❌ Ultramsg send error:", err.response?.data || err.message);
+    console.error("❌ Ultramsg error:", err.response?.data || err.message);
   }
 }
 
-// رد ذكي باستخدام OpenAI
-async function generateAIResponse(userId, text, context = "") {
+// إرسال مكالمة عبر واتساب (Ultramsg يدعم نوع call)
+async function sendWhatsAppCall(to) {
   try {
-    const history = conversationCache.get(userId) || [];
-    const messages = [
-      { role: "system", content: "أنت بوت خدمة عملاء لمتجر eSelect | إي سيلكت. رد بود واحترام واحترافية." },
-      ...history,
-      { role: "user", content: text }
-    ];
-
-    const res = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4o-mini",
-        messages,
-        max_tokens: 300,
-        temperature: 0.6
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    const reply = res.data.choices[0].message.content;
-    history.push({ role: "user", content: text });
-    history.push({ role: "assistant", content: reply });
-    conversationCache.set(userId, history.slice(-10)); // حفظ آخر 10 رسائل فقط
-    return reply;
+    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/call`;
+    const res = await axios.post(url, {
+      token: ULTRAMSG_TOKEN,
+      to,
+      body: "مكالمة من eSelect | إي سيلكت"
+    });
+    console.log("📞 Initiated WhatsApp call to", to, res.data);
+    return true;
   } catch (err) {
-    console.error("❌ ChatGPT error:", err.response?.data || err.message);
-    return "عذرًا، صار خطأ مؤقت. حاول مرة ثانية 🙏";
+    console.error("❌ Ultramsg call error:", err.response?.data || err.message);
+    return false;
   }
 }
 
-// منطق الرد على العملاء
+// =============== منطق الرد ===============
 async function handleCustomerQuery(userId, phone, text) {
-  // تحقق من وضع الموظف
+  // إذا في وضع موظف → تجاهل
   if (isInHumanOverride(userId)) {
-    return `تم تحويلك لموظف خدمة عملاء 👨‍💼، يرجى الانتظار.`;
+    console.log(`⏸️ Ignoring ${userId} (human takeover active)`);
+    return null;
   }
 
   // إذا طلب موظف
   if (isHumanRequest(text)) {
-    humanOverride.set(userId, Date.now() + 60 * 60 * 1000); // ساعة
-    return `تم تحويلك لأحد موظفينا المختصين 👨‍💼. يمكنك أيضًا الاتصال على ${SUPPORT_PHONE} ☎️`;
+    if (!humanOverride.get(userId)) {
+      humanOverride.set(userId, Date.now() + 60 * 60 * 1000); // ساعة
+
+      // حاول المكالمة أولاً
+      const callOk = await sendWhatsAppCall(`968${SUPPORT_PHONE}`);
+      if (callOk) {
+        return `تم تحويلك لأحد موظفينا المختصين 👨‍💼.\n📞 جاري الاتصال بالدعم الفني...`;
+      } else {
+        return `تم تحويلك لأحد موظفينا المختصين 👨‍💼.\n📞 يمكنك الاتصال مباشرة عبر الرابط: https://wa.me/${SUPPORT_PHONE}`;
+      }
+    }
+    return null; // لا يكرر
   }
 
   // تحقق من وجود طلبات
   const orders = await getCustomerOrdersByPhone(phone);
   if (orders.length > 0) {
-    const order = orders[0]; // أول طلب
+    const order = orders[0];
     if (/طلب|order|حالة/i.test(text)) {
-      return `🔎 تفاصيل طلبك #${order.order_number}:\n- الحالة المالية: ${order.financial_status}\n- حالة التوصيل: ${order.fulfillment_status || "قيد المعالجة"}\n- المبلغ: ${order.total_price} OMR\n- ملاحظات: ${order.note || "لا توجد"}\n\n📦 شكرًا لتسوقك معنا 🙏`;
+      return `🔎 تفاصيل طلبك #${order.order_number}:\n- الحالة المالية: ${order.financial_status}\n- حالة التوصيل: ${order.fulfillment_status || "قيد المعالجة"}\n- المبلغ: ${order.total_price} OMR\n- ملاحظات: ${order.note || "لا توجد"}\n\nشكراً لتسوقك معنا 🙏`;
     }
   } else {
-    // زبون جديد
-    return `👋 أهلاً بك في eSelect | إي سيلكت! يبدو أنك زبون جديد 🌟\n\nلدينا مجموعة واسعة من المنتجات (أجهزة كهربائية، ملحقات سيارات، منتجات العناية والجمال، الرياضة وغيرها).\n\nطرق الدفع: 💳 بطاقة / 💵 عند الاستلام / 🔗 تحويل مصرفي\nالتوصيل 🚚 خلال 2-4 أيام.\n\nهل ترغب أن أرسل لك بعض المنتجات المميزة اليوم؟`;
+    return `👋 أهلاً بك في eSelect | إي سيلكت! يبدو أنك زبون جديد 🌟.\n\nطرق الدفع: 💳 بطاقة / 💵 عند الاستلام / 🔗 تحويل مصرفي\nالتوصيل 🚚 خلال 2-4 أيام.\n\nهل ترغب أن أرسل لك بعض المنتجات المميزة؟`;
   }
 
-  // الرد الافتراضي عبر GPT
-  let attempts = failedAttempts.get(userId) || 0;
-  const reply = await generateAIResponse(userId, text);
-
-  if (reply.includes("عذرًا") || reply.includes("لا أستطيع")) {
-    attempts++;
-    failedAttempts.set(userId, attempts);
-    if (attempts >= 3) {
-      humanOverride.set(userId, Date.now() + 60 * 60 * 1000);
-      failedAttempts.delete(userId);
-      return `ألاحظ أن استفسارك يحتاج متابعة خاصة 🤔، سأحوّلك الآن إلى أحد موظفينا المختصين 👨‍💼`;
-    }
-  } else {
-    failedAttempts.set(userId, 0);
-  }
-
-  return reply;
+  return "هل ترغب أن أساعدك بشيء آخر بخصوص طلبك أو منتجاتنا؟";
 }
 
 // =============== Webhook ===============
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
-    console.log("📩 Incoming:", JSON.stringify(body, null, 2));
-
     const event = body.event_type || body.eventType;
-    if (event !== "message_received") {
-      console.log("↩️ Ignored event_type:", event);
-      return res.sendStatus(200);
-    }
+    if (event !== "message_received") return res.sendStatus(200);
 
     const msg = body.data || body;
     const userId = msg.from;
@@ -182,7 +145,9 @@ app.post("/webhook", async (req, res) => {
     if (!text) return res.sendStatus(200);
 
     const reply = await handleCustomerQuery(userId, phone, text);
-    await sendWhatsAppMessage(userId, reply);
+    if (reply) {
+      await sendWhatsAppMessage(userId, reply);
+    }
 
     res.sendStatus(200);
   } catch (err) {
