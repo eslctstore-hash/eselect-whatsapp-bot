@@ -1,112 +1,128 @@
-// server.cjs
-require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const bodyParser = require("body-parser");
+require("dotenv").config();
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-const ULTRAMSG_INSTANCE = process.env.ULTRAMSG_INSTANCE;
+const ULTRAMSG_API = `https://api.ultramsg.com/${process.env.ULTRAMSG_INSTANCE_ID}`;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
-const SHOPIFY_DOMAIN = process.env.SHOPIFY_DOMAIN;
-const SHOPIFY_ADMIN_API = process.env.SHOPIFY_ADMIN_API;
-const SUPPORT_PHONE = process.env.SUPPORT_PHONE || "96894682186";
+const SHOPIFY_API = `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2025-01`;
+const SHOPIFY_TOKEN = process.env.SHOPIFY_API_TOKEN;
 
-async function sendMessage(to, text) {
+// ذاكرة الجلسة
+const sessions = {};
+
+// 📨 إرسال رسالة
+async function sendMessage(to, body) {
   try {
-    if (!text || text.trim() === "") return;
-
-    // تقسيم الرسائل الطويلة
-    const chunkSize = 2000;
-    for (let i = 0; i < text.length; i += chunkSize) {
-      const part = text.substring(i, i + chunkSize);
-      await axios.post(
-        `https://api.ultramsg.com/${ULTRAMSG_INSTANCE}/messages/chat`,
-        { token: ULTRAMSG_TOKEN, to, body: part }
-      );
-    }
+    await axios.post(`${ULTRAMSG_API}/messages/chat`, {
+      token: ULTRAMSG_TOKEN,
+      to,
+      body,
+    });
   } catch (err) {
-    console.error("❌ Ultramsg send error:", err.response?.data || err.message);
+    console.error("❌ Error sending message:", err.response?.data || err.message);
   }
 }
 
-async function getCustomerOrdersByPhone(phone) {
-  if (!SHOPIFY_DOMAIN || !SHOPIFY_ADMIN_API) {
-    console.error("❌ Shopify domain or API key not configured!");
-    return [];
-  }
-
+// 📦 جلب منتج من Shopify
+async function getProductByName(query) {
   try {
-    const cleanPhone = phone.replace(/^(\+|00)/, "").replace(/^968/, "");
-    const url = `https://${SHOPIFY_DOMAIN}/admin/api/2025-01/orders.json?status=any&fields=id,order_number,current_total_price,financial_status,fulfillment_status,phone,customer,order_status_url`;
-
-    const res = await axios.get(url, {
-      headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ADMIN_API,
-        "Content-Type": "application/json",
-      },
+    const res = await axios.get(`${SHOPIFY_API}/products.json?title=${encodeURIComponent(query)}`, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN }
     });
-
-    const orders = res.data.orders || [];
-    return orders.filter((o) => {
-      if (!o.phone && !o.customer?.phone) return false;
-      const phones = [
-        (o.phone || "").replace(/\D/g, ""),
-        (o.customer?.phone || "").replace(/\D/g, ""),
-      ];
-      return phones.some((p) =>
-        p.endsWith(cleanPhone) || cleanPhone.endsWith(p)
-      );
-    });
+    if (res.data.products.length === 0) return null;
+    return res.data.products[0];
   } catch (err) {
-    console.error("❌ Shopify fetch error:", err.response?.data || err.message);
-    return [];
+    console.error("❌ Shopify fetch error:", err.message);
+    return null;
   }
 }
 
+// 🧠 معالجة الرسائل
 async function handleMessage(from, body) {
-  body = body.trim();
+  const now = Date.now();
 
-  if (/موظف|شخص|بشر|حد يرد/i.test(body)) {
-    await sendMessage(
-      from,
-      "✅ تم تحويلك إلى أحد موظفينا المختصين 👨‍💼، يرجى الانتظار لحين الرد عليك."
-    );
+  // تهيئة جلسة العميل
+  if (!sessions[from]) {
+    sessions[from] = {
+      lastGreet: false,
+      lastTransfer: 0,
+    };
+  }
+
+  const session = sessions[from];
+
+  // ⏱️ إذا المحادثة محولة للموظف (إيقاف ساعة)
+  if (now - session.lastTransfer < 60 * 60 * 1000) {
+    console.log("⏸️ Session paused for", from);
     return;
   }
 
-  const orders = await getCustomerOrdersByPhone(from.replace("@c.us", ""));
-  if (orders.length > 0) {
-    const order = orders[0];
-    let reply = `🛒 رقم الطلب: #${order.order_number}\n`;
-    reply += `💰 المبلغ: ${order.current_total_price} ر.ع\n`;
-    reply += `📌 حالة الدفع: ${order.financial_status}\n`;
-    reply += `🚚 حالة الشحن: ${order.fulfillment_status || "قيد المعالجة"}\n\n`;
-    reply += `🔗 تتبع طلبك: ${order.order_status_url}`;
-
-    await sendMessage(from, reply);
-  } else {
-    await sendMessage(
-      from,
-      "👋 أهلاً بك في eSelect | إي سيلكت!\nكيف أقدر أساعدك اليوم بخصوص المنتجات أو الطلبات؟"
-    );
+  // 👋 رسالة الترحيب (مره وحده فقط)
+  if (!session.lastGreet) {
+    await sendMessage(from, "👋 أهلاً بك في eSelect | إي سيلكت!\nكيف أقدر أساعدك اليوم بخصوص المنتجات أو الطلبات؟");
+    session.lastGreet = true;
+    return;
   }
+
+  const lower = body.toLowerCase();
+
+  // 👨‍💼 تحويل للموظف
+  if (/موظف|شخص|حقيقي|بشر/.test(body)) {
+    await sendMessage(from, "📞 تم تحويلك إلى موظف خدمة العملاء، يرجى الانتظار لحين الرد من المختص.");
+    session.lastTransfer = now;
+    return;
+  }
+
+  // 📦 استفسار عن الطلب
+  if (/طلب|طلبي/.test(body)) {
+    await sendMessage(from, "📦 يرجى تزويدنا برقم الطلب حتى نتمكن من خدمتك بشكل أدق.");
+    return;
+  }
+
+  // 🚚 استفسار عن التوصيل
+  if (/متى توصل|التوصيل|الشحن/.test(body)) {
+    await sendMessage(from, "🚚 عادة التوصيل يستغرق من 1 إلى 3 أيام عمل داخل سلطنة عمان.");
+    return;
+  }
+
+  // 🔎 البحث عن منتج
+  if (/كم|سعر|توفر|متوفر|منتج/.test(body)) {
+    const product = await getProductByName(body);
+    if (product) {
+      const price = product.variants[0]?.price || "غير محدد";
+      await sendMessage(from, `✅ المنتج متوفر: ${product.title}\n💰 السعر: ${price} ريال عماني`);
+    } else {
+      await sendMessage(from, "❌ عذرًا المنتج غير متوفر حاليًا.");
+    }
+    return;
+  }
+
+  // ❓ أي شيء آخر
+  await sendMessage(from, "❓ لم أتمكن من فهم استفسارك. يرجى الانتظار لحين الرد عليك من الموظف المختص.");
 }
 
+// 📩 استقبال Webhook من Ultramsg
 app.post("/webhook", async (req, res) => {
-  const event = req.body;
-  console.log("📩 Incoming:", JSON.stringify(event, null, 2));
-
-  if (event.event_type === "message_received") {
-    const msg = event.data;
-    await handleMessage(msg.from, msg.body);
+  try {
+    const data = req.body;
+    if (data.event_type === "message_received" && data.data?.fromMe === false) {
+      const from = data.data.from;
+      const body = data.data.body?.trim() || "";
+      if (body) {
+        console.log("📩 رسالة جديدة من", from, ":", body);
+        await handleMessage(from, body);
+      }
+    }
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Webhook error:", err.message);
+    res.sendStatus(500);
   }
-
-  res.sendStatus(200);
 });
 
+// 🚀 بدء السيرفر
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () =>
-  console.log(`🚀 WhatsApp bot running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🚀 WhatsApp bot running on port ${PORT}`));
