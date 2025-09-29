@@ -1,56 +1,78 @@
-// server.cjs
-const express = require("express");
-const bodyParser = require("body-parser");
-const axios = require("axios");
-const NodeCache = require("node-cache");
+// تحميل المتغيرات من ملف .env
 require("dotenv").config();
 
+const express = require("express");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-// ✅ كاش للمحادثات والاستفسارات (يبقى ساعتين)
-const conversationCache = new NodeCache({ stdTTL: 7200, checkperiod: 120 });
-
-// 🔑 متغيرات البيئة
+// ==========================
+// إعدادات من ملف .env
+// ==========================
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
+const PORT = process.env.PORT || 10000;
 
-// 📌 Webhook لاستقبال رسائل واتساب
-app.post("/webhook", async (req, res) => {
+// ملف لتخزين المحادثات (الكاش)
+const conversationsFile = path.join(__dirname, "conversations.json");
+
+// تحميل المحادثات السابقة إن وجدت
+let conversations = {};
+if (fs.existsSync(conversationsFile)) {
   try {
-    const message = req.body.data?.body;
-    const from = req.body.data?.from;
+    conversations = JSON.parse(fs.readFileSync(conversationsFile));
+  } catch (err) {
+    console.error("❌ خطأ في قراءة conversations.json:", err.message);
+  }
+}
 
-    if (!message || !from) {
-      return res.sendStatus(200);
+// حفظ المحادثات في ملف
+function saveConversations() {
+  fs.writeFileSync(conversationsFile, JSON.stringify(conversations, null, 2));
+}
+
+// ==========================
+// دالة إرسال رسالة عبر Ultramsg
+// ==========================
+async function sendMessage(to, body) {
+  try {
+    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
+    await axios.post(url, {
+      token: ULTRAMSG_TOKEN,
+      to,
+      body,
+    });
+    console.log(`✅ أُرسلت رسالة إلى ${to}: ${body}`);
+  } catch (error) {
+    console.error("❌ خطأ أثناء إرسال الرسالة:", error.response?.data || error.message);
+  }
+}
+
+// ==========================
+// استدعاء ChatGPT
+// ==========================
+async function askChatGPT(userId, userMessage) {
+  try {
+    // إعداد المحادثة من الكاش
+    if (!conversations[userId]) {
+      conversations[userId] = [];
     }
+    conversations[userId].push({ role: "user", content: userMessage });
 
-    console.log(`📩 رسالة من ${from}: ${message}`);
-
-    // ✅ اجلب محادثة العميل من الكاش
-    let history = conversationCache.get(from) || [];
-
-    // ✅ جهز الرسالة للإرسال لـ ChatGPT
-    const context = `
-أنت مساعد ذكي يعمل كموظف خدمة عملاء لمتجر eSelect | إي سيلكت.
-يجب أن ترد باللهجة العمانية اللطيفة، وتكون الردود احترافية جدًا.
-استخدم دائمًا محتوى المتجر (المنتجات، الأسعار، السياسات) إن توفر.
-`;
-
-    const gptResponse = await axios.post(
+    // الطلب إلى OpenAI
+    const response = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: context },
-          ...history,
-          { role: "user", content: message }
+          { role: "system", content: "أنت موظف خدمة عملاء لمتجر eSelect | إي سيلكت. رد باللهجة العمانية باحترافية وكأنك موظف حقيقي. قدم تفاصيل دقيقة عن المنتجات، الأسعار، الشحن، السياسات. إذا كان السؤال عام، جاوب كأنك ChatGPT عادي ولكن مختصر." },
+          ...conversations[userId],
         ],
         max_tokens: 500,
-        temperature: 0.7,
       },
       {
         headers: {
@@ -60,31 +82,50 @@ app.post("/webhook", async (req, res) => {
       }
     );
 
-    const reply = gptResponse.data.choices[0].message.content;
-    console.log(`✅ رد: ${reply}`);
+    const answer = response.data.choices[0].message.content;
 
-    // ✅ خزّن المحادثة في الكاش
-    history.push({ role: "user", content: message });
-    history.push({ role: "assistant", content: reply });
-    conversationCache.set(from, history);
+    // حفظ رد ChatGPT في الكاش
+    conversations[userId].push({ role: "assistant", content: answer });
+    saveConversations();
 
-    // ✅ أرسل الرد عبر Ultramsg
-    await axios.post(
-      `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`,
-      {
-        token: ULTRAMSG_TOKEN,
-        to: from,
-        body: reply,
-      }
-    );
+    return answer;
+  } catch (error) {
+    console.error("❌ ChatGPT error:", error.response?.data || error.message);
+    return "عذرًا، صار خطأ مؤقت. حاول مرة ثانية 🙏";
+  }
+}
+
+// ==========================
+// Webhook من Ultramsg
+// ==========================
+app.post("/webhook", async (req, res) => {
+  try {
+    const data = req.body;
+    if (!data || !data.data) {
+      return res.sendStatus(400);
+    }
+
+    const from = data.data.from;
+    const body = data.data.body;
+
+    console.log(`📩 رسالة من ${from}: ${body}`);
+
+    // إرسال الطلب إلى ChatGPT
+    const reply = await askChatGPT(from, body);
+
+    // الرد إلى العميل
+    await sendMessage(from, reply);
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("❌ خطأ:", err.response?.data || err.message);
+    console.error("❌ Webhook error:", err.message);
     res.sendStatus(500);
   }
 });
 
-// ✅ اجعل البورت ديناميكي من Render
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Bot running on port ${PORT}`));
+// ==========================
+// تشغيل السيرفر
+// ==========================
+app.listen(PORT, () => {
+  console.log(`🚀 Bot running on port ${PORT}`);
+});
