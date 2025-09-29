@@ -1,21 +1,26 @@
-const express = require("express");
-const app = express();
+app.post("/webhook", async (req, res) => {
+  try {
+    const body = req.body;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+    if (!body || !body.data || !body.data.body) {
+      console.log("❌ Received webhook but no message body:", body);
+      return res.sendStatus(200);
+    }
 
-// ✅ للتأكد أن السيرفر شغال
-app.get("/", (req, res) => {
-  res.send("🚀 WhatsApp bot is running");
+    const from = body.data.from.replace("@c.us", ""); // رقم العميل
+    const message = body.data.body; // نص الرسالة
+
+    console.log(`📩 رسالة من ${from}: ${message}`);
+
+    // ✨ الرد من ChatGPT
+    const gptReply = await askChatGPT(message);
+
+    // ✨ إرسال الرد عبر UltraMsg
+    await sendWhatsAppMessage(from, gptReply);
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Error in webhook:", err.message);
+    res.sendStatus(500);
+  }
 });
-
-// ✅ تسجيل أي Webhook يوصل
-app.post("/webhook", (req, res) => {
-  console.log("📩 Headers:", req.headers);
-  console.log("📩 Body:", req.body);
-
-  res.sendStatus(200);
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Bot running on port ${PORT}`));
