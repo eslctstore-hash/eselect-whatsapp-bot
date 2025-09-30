@@ -57,6 +57,29 @@ app.post('/webhook', async (req, res) => {
     if (!messageData) { return res.sendStatus(200); }
 
     const from = messageData.from;
+
+// --- نقطة استقبال الويب هوك من Ultramsg ---
+app.post('/webhook', async (req, res) => {
+    const messageData = req.body.data;
+    if (!messageData) { return res.sendStatus(200); }
+
+    const from = messageData.from;
+    const messageBody = messageData.body;
+    
+    // ---  ⬇️⬇️ أضف هذا الكود هنا ⬇️⬇️ ---
+    const BOT_WHATSAPP_NUMBER = process.env.BOT_WHATSAPP_NUMBER;
+    // تجاهل الرسائل التي تأتي من البوت نفسه (لمنع الحلقة المفرغة)
+    if (from === BOT_WHATSAPP_NUMBER) {
+        console.log("Ignoring echo message from self.");
+        return res.sendStatus(200);
+    }
+    // ---  ⬆️⬆️ نهاية الكود المضاف ⬆️⬆️ ---
+
+
+    if (pausedUsers.has(from)) {
+        // ... باقي الكود يبقى كما هو
+
+  
     const messageBody = messageData.body;
 
     if (pausedUsers.has(from)) {
