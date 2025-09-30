@@ -20,7 +20,7 @@ const SUPPORT_PHONE_NUMBER = process.env.SUPPORT_PHONE_NUMBER; // رقم الد�
 
 // --- إعداد Gemini AI ---
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+const model = genAI.getGenerativeModel({ model: "gemini-1.0-pro" });
 
 // --- ذاكرة مؤقتة لتخزين بيانات العملاء وحالة التوقف ---
 const userSessions = new Map();
