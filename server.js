@@ -24,7 +24,7 @@ const GOOGLE_LOCATION = process.env.GOOGLE_LOCATION; // مثال: "us-central1"
 
 // --- إعداد Gemini AI عبر Vertex AI (الطريقة الصحيحة للسيرفر) ---
 const vertex_ai = new VertexAI({ project: GOOGLE_PROJECT_ID, location: GOOGLE_LOCATION });
-const model = 'gemini-1.0-pro'; // اسم النموذج يبقى كما هو
+const model = 'gemini-pro'; // اسم النموذج يبقى كما هو
 
 const generativeModel = vertex_ai.preview.getGenerativeModel({
   model: model,
