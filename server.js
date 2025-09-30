@@ -4,12 +4,12 @@ import axios from 'axios';
 import 'dotenv/config';
 import OpenAI from 'openai';
 
-// --- الإعدادات الأساسية ---
+// --- Basic Setup ---
 const app = express();
 app.use(bodyParser.json());
 const PORT = process.env.PORT || 3000;
 
-// --- متغيرات البيئة ---
+// --- Environment Variables ---
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -18,19 +18,17 @@ const SUPPORT_PHONE_NUMBER = process.env.SUPPORT_PHONE_NUMBER;
 const YOUR_STORE_API_URL = process.env.YOUR_STORE_API_URL;
 const YOUR_STORE_API_TOKEN = process.env.YOUR_STORE_API_TOKEN;
 
-// --- إعداد OpenAI ---
+// --- OpenAI Setup ---
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// --- الذاكرة المؤقتة ---
+// --- In-memory Storage ---
 const userSessions = new Map();
-const pausedUsers = new Map();
 
-// --- دوال التواصل مع API متجرك (Shopify) ---
+// --- Shopify API Functions ---
 
 async function findProduct(productName) {
   console.log(`Searching for Shopify product: ${productName}`);
   const shopifyUrl = `${YOUR_STORE_API_URL}/products.json?title=${encodeURIComponent(productName)}`;
-  
   try {
     const response = await axios.get(shopifyUrl, {
       headers: {
@@ -43,22 +41,19 @@ async function findProduct(productName) {
       const product = response.data.products[0];
       const firstVariant = product.variants[0];
       const isAvailable = firstVariant.inventory_quantity > 0;
-      
-      return `النتيجة: المنتج متوفر. الاسم: ${product.title}, السعر: ${firstVariant.price} ريال عماني, الحالة: ${isAvailable ? `متوفر بالمخزون (${firstVariant.inventory_quantity} قطعة)` : 'نفدت الكمية'}. رابط المنتج: https://eselect.store/products/${product.handle}`;
+      return `Result: Product found. Name: ${product.title}, Price: ${firstVariant.price} OMR, Status: ${isAvailable ? `Available (${firstVariant.inventory_quantity} in stock)` : 'Out of Stock'}. Link: https://eselect.store/products/${product.handle}`;
     }
-    return "النتيجة: لم يتم العثور على منتج بهذا الاسم في المتجر.";
+    return "Result: Product not found.";
   } catch (error) {
     console.error("Error finding Shopify product:", error.response ? error.response.data : error.message);
-    return "النتيجة: حدث خطأ أثناء الاتصال ببيانات المتجر.";
+    return "Result: Error connecting to the store database.";
   }
 }
 
 async function getOrderDetails(orderName) {
     console.log(`Searching for Shopify order: ${orderName}`);
-    // نزيل علامة # إذا أضافها المستخدم
     const cleanOrderName = orderName.replace('#', '');
     const shopifyUrl = `${YOUR_STORE_API_URL}/orders.json?name=${encodeURIComponent(cleanOrderName)}&status=any`;
-
     try {
         const response = await axios.get(shopifyUrl, {
             headers: {
@@ -69,29 +64,28 @@ async function getOrderDetails(orderName) {
 
         if (response.data && response.data.orders.length > 0) {
             const order = response.data.orders[0];
-            const trackingUrl = order.fulfillments.length > 0 ? (order.fulfillments[0].tracking_url || 'لا يوجد رابط تتبع بعد') : 'لم يتم الشحن بعد';
-            const fulfillmentStatus = order.fulfillment_status || 'لم تتم المعالجة';
-
-            return `النتيجة: حالة الطلب #${order.name} هي: ${fulfillmentStatus}. رابط التتبع: ${trackingUrl}.`;
+            const trackingUrl = order.fulfillments.length > 0 ? (order.fulfillments[0].tracking_url || 'No tracking link yet') : 'Not shipped yet';
+            const fulfillmentStatus = order.fulfillment_status || 'Unfulfilled';
+            return `Result: Order #${order.name} status is: ${fulfillmentStatus}. Tracking link: ${trackingUrl}.`;
         }
-        return `النتيجة: لم يتم العثور على طلب بهذا الرقم.`;
+        return `Result: No order found with this number.`;
     } catch (error) {
         console.error("Error finding Shopify order:", error.response ? error.response.data : error.message);
-        return "النتيجة: حدث خطأ أثناء الاتصال ببيانات المتجر.";
+        return "Result: Error connecting to the store database.";
     }
 }
 
 
-// --- تعريف الأدوات (Functions) التي سيستخدمها الذكاء الاصطناعي ---
+// --- OpenAI Tool Definitions ---
 const tools = [
   {
     type: "function",
     function: {
       name: "findProduct",
-      description: "يبحث عن منتج معين في متجر eSelect ويعيد تفاصيله وسعره وحالة توفره.",
+      description: "Searches for a specific product in the eSelect store and returns its details, price, and availability.",
       parameters: {
         type: "object",
-        properties: { productName: { type: "string", description: "اسم المنتج المراد البحث عنه" } },
+        properties: { productName: { type: "string", description: "The name of the product to search for, e.g., 'iPhone 15' or 'Samsung Charger'" } },
         required: ["productName"],
       },
     },
@@ -100,10 +94,10 @@ const tools = [
     type: "function",
     function: {
         name: "getOrderDetails",
-        description: "يبحث عن حالة طلب معين باستخدام رقم الطلب الخاص بالعميل.",
+        description: "Looks up the status of a specific order using the customer's order number.",
         parameters: {
             type: "object",
-            properties: { orderName: { type: "string", description: "رقم الطلب الذي يزود به العميل، مثلا #1050" } },
+            properties: { orderName: { type: "string", description: "The customer's order number, e.g., '#1050'" } },
             required: ["orderName"],
         },
     },
@@ -111,28 +105,11 @@ const tools = [
 ];
 
 
-// --- دوال التواصل مع واتساب ---
-async function sendWhatsappMessage(to, body) {
-    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
-    try {
-        await axios.post(url, { token: ULTRAMSG_TOKEN, to, body, priority: 10 });
-        console.log(`Message sent to ${to}`);
-    } catch (error) {
-        console.error("Error sending message:", error.response ? error.response.data : error.message);
-    }
-}
+// --- WhatsApp Helper Functions ---
+async function sendWhatsappMessage(to, body) { /* Unchanged */ }
+async function sendCallButton(to, body, phoneNumber) { /* Unchanged */ }
 
-async function sendCallButton(to, body, phoneNumber) {
-    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/buttons`;
-    try {
-        await axios.post(url, { token: ULTRAMSG_TOKEN, to, body, buttons: [{ "type": "call", "title": "اتصل بالدعم الفني", "payload": phoneNumber }] });
-        console.log(`Call button sent to ${to}`);
-    } catch (error) {
-        console.error("Error sending call button:", error.response ? error.response.data : error.message);
-    }
-}
-
-// --- نقطة استقبال الويب هوك الرئيسية ---
+// --- Main Webhook Handler ---
 app.post('/webhook', async (req, res) => {
     const messageData = req.body.data;
     if (!messageData) return res.sendStatus(200);
@@ -150,11 +127,13 @@ app.post('/webhook', async (req, res) => {
             userSessions.set(from, { history: [] });
         }
         const session = userSessions.get(from);
+        
+        // Add the current user message to the session history
+        session.history.push({ role: "user", content: messageBody });
 
         const messages = [
-            { role: "system", content: "أنت مساعد خدمة عملاء ذكي لمتجر eSelect في سلطنة عمان. استخدم الأدوات المتاحة لك للبحث عن المنتجات والطلبات قبل الإجابة. ابحث في صفحات المتجر و السياسات و طرق الدفع و الاسئلة الشائعة تحدث باللهجة العمانية فقط بأسلوب ودود و أكسب الزيون بالمعالمة الطيبة. اسم المتجر: eSelect. الموقع: eselect.store" },
-            ...session.history,
-            { role: "user", content: messageBody }
+            { role: "system", content: "You are a helpful customer service assistant for an Omani store named eSelect. Use the tools provided to search for products and orders. Speak in an Omani dialect. Store name: eSelect. Website: eselect.store" },
+            ...session.history
         ];
 
         const initialResponse = await openai.chat.completions.create({
@@ -185,9 +164,11 @@ app.post('/webhook', async (req, res) => {
                 });
             }
 
+            // *** THE FIX IS HERE ***
+            // We send the *entire updated history* back to OpenAI for the final response.
             const finalResponse = await openai.chat.completions.create({
                 model: "gpt-4o",
-                messages: session.history, // نرسل السجل المحدث
+                messages: session.history,
             });
 
             const finalMessage = finalResponse.choices[0].message.content;
@@ -196,7 +177,6 @@ app.post('/webhook', async (req, res) => {
 
         } else {
             const aiResponse = responseMessage.content;
-            session.history.push({ role: 'user', content: messageBody });
             session.history.push({ role: 'assistant', content: aiResponse });
             await sendWhatsappMessage(from, aiResponse);
         }
@@ -206,14 +186,35 @@ app.post('/webhook', async (req, res) => {
         }
 
     } catch (error) {
-        console.error("Error in webhook processing:", error.response ? error.response.data : error);
+        console.error("Error in webhook processing:", error);
         await sendWhatsappMessage(from, "عذراً، حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.");
     }
     
     res.sendStatus(200);
 });
 
-// --- تشغيل السيرفر ---
+// --- Server Start ---
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
+
+// --- Unchanged Helper Functions ---
+async function sendWhatsappMessage(to, body) {
+    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
+    try {
+        await axios.post(url, { token: ULTRAMSG_TOKEN, to, body, priority: 10 });
+        console.log(`Message sent to ${to}`);
+    } catch (error) {
+        console.error("Error sending message:", error.response ? error.response.data : error.message);
+    }
+}
+
+async function sendCallButton(to, body, phoneNumber) {
+    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/buttons`;
+    try {
+        await axios.post(url, { token: ULTRAMSG_TOKEN, to, body, buttons: [{ "type": "call", "title": "اتصل بالدعم الفني", "payload": phoneNumber }] });
+        console.log(`Call button sent to ${to}`);
+    } catch (error) {
+        console.error("Error sending call button:", error.response ? error.response.data : error.message);
+    }
+}
