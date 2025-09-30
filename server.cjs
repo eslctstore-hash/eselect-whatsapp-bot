@@ -1,6 +1,5 @@
 // server.cjs
 
-require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const bodyParser = require("body-parser");
@@ -11,34 +10,32 @@ app.use(bodyParser.json());
 // ==========================
 // متغيرات البيئة
 // ==========================
-const {
-  ULTRAMSG_INSTANCE,
-  ULTRAMSG_TOKEN,
-  SHOPIFY_STORE,
-  SHOPIFY_API_KEY,
-  SHOPIFY_PASSWORD,
-  OPENAI_API_KEY,
-  SUPPORT_NUMBER,
-} = process.env;
+const ULTRAMSG_INSTANCE = process.env.ULTRAMSG_INSTANCE;
+const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
+
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE; // مثال: eselect.store
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+const SHOPIFY_PASSWORD = process.env.SHOPIFY_PASSWORD;
+
+const BOT_NUMBER = process.env.BOT_NUMBER; // رقم البوت (نفس رقم الدعم)
 
 // ==========================
-// الذاكرة للجلسات
+// تخزين الجلسات والردود
 // ==========================
 const sessions = {};
+const lastReply = {}; // لتفادي تكرار الرد
 
 // ==========================
-// إرسال رسالة واتساب عبر Ultramsg
+// إرسال رسالة واتساب
 // ==========================
-async function sendMessage(to, body, buttons) {
+async function sendMessage(to, body) {
   try {
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE}/messages/chat`;
-    const payload = {
+    const res = await axios.post(url, {
       token: ULTRAMSG_TOKEN,
       to,
       body,
-    };
-    if (buttons) payload.buttons = buttons;
-    const res = await axios.post(url, payload);
+    });
     console.log("✅ Sent via Ultramsg:", res.data);
   } catch (err) {
     console.error("❌ Send error:", err.response?.data || err.message);
@@ -46,7 +43,7 @@ async function sendMessage(to, body, buttons) {
 }
 
 // ==========================
-// التحقق من الطلبات من Shopify
+// جلب الطلب من Shopify
 // ==========================
 async function fetchOrder(orderId) {
   try {
@@ -60,119 +57,65 @@ async function fetchOrder(orderId) {
 }
 
 // ==========================
-// البحث عن المنتجات في Shopify
-// ==========================
-async function searchProduct(query) {
-  try {
-    const url = `https://${SHOPIFY_API_KEY}:${SHOPIFY_PASSWORD}@${SHOPIFY_STORE}/admin/api/2025-01/products.json?title=${encodeURIComponent(
-      query
-    )}`;
-    const res = await axios.get(url);
-    return res.data.products || [];
-  } catch (err) {
-    console.error("❌ Shopify product error:", err.response?.data || err.message);
-    return [];
-  }
-}
-
-// ==========================
-// OpenAI للرد الذكي
-// ==========================
-async function askAI(prompt) {
-  try {
-    const res = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4o-mini",
-        messages: [{ role: "system", content: "أنت مساعد ودود يرد باللهجة العمانية لمتجر eSelect." }, { role: "user", content: prompt }],
-        max_tokens: 500,
-      },
-      {
-        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-      }
-    );
-    return res.data.choices[0].message.content.trim();
-  } catch (err) {
-    console.error("❌ OpenAI error:", err.response?.data || err.message);
-    return "عذرًا، صار خلل مؤقت. جرب مرة ثانية.";
-  }
-}
-
-// ==========================
 // معالجة الرسائل
 // ==========================
 async function handleMessage(from, text) {
+  // تجاهل رسائل البوت نفسه
+  if (from === BOT_NUMBER) return;
+
+  // إنشاء جلسة للعميل إذا ما موجودة
   if (!sessions[from]) {
-    sessions[from] = { human: false, lastOrder: null, lastContact: null };
-    await sendMessage(
-      from,
-      "👋 حيّاك الله في eSelect | إي سيلكت! كيف ممكن أساعدك اليوم بخصوص المنتجات أو الطلبات؟"
-    );
-    return;
+    sessions[from] = { human: false, lastOrder: null };
   }
 
-  // 🔹 طلب محادثة موظف
-  if (/(موظف|بشر|خدمة|شخص|حد)/i.test(text)) {
+  let replyText = null;
+
+  // إذا العميل طلب موظف بشري
+  if (/(موظف|بشر|شخص|الحقيقي|خدمة)/i.test(text)) {
     if (!sessions[from].human) {
       sessions[from].human = true;
-      sessions[from].lastContact = Date.now();
-      await sendMessage(from, "📞 تم تحويلك لموظف مختص، يرجى الانتظار لحين الرد عليك.");
-      await sendMessage(from, "للتواصل مباشرة مع الدعم:", [
-        { id: "call", text: "اتصال عبر الواتساب", url: `https://wa.me/${SUPPORT_NUMBER}` },
-      ]);
+      replyText =
+        "👨‍💼 تم تحويلك إلى أحد موظفينا المختصين.\n📞 يرجى الانتظار لحين الرد عليك من قبل الموظف.";
     }
-    return;
   }
 
-  // 🔹 استفسار عن طلب
-  if (/(طلب|طلبي|طلبية|اوردري|اوردر)/i.test(text)) {
-    const match = text.match(/\d{3,6}/);
+  // إذا العميل استفسر عن طلب
+  else if (
+    /(طلب|طلبي|طلبيتي|طلبتي|طلبية|طلبياتي|اوردري|اوردر|أوردراتي)/i.test(text)
+  ) {
+    const match = text.match(/\d{3,6}/); // البحث عن رقم طلب
     if (match) {
       const orderId = match[0];
       sessions[from].lastOrder = orderId;
 
-      await sendMessage(from, `📦 جاري التحقق من تفاصيل الطلب رقم ${orderId}...`);
+      replyText = `📦 تم استلام رقم الطلب: ${orderId}\n⏳ يرجى الانتظار، وسيتم التحقق من حالة طلبك.`;
 
       const order = await fetchOrder(orderId);
       if (order) {
-        await sendMessage(
-          from,
-          `✅ تفاصيل الطلب #${orderId}:\n👤 العميل: ${
-            order.customer?.first_name || "غير معروف"
-          }\n💵 المبلغ: ${order.total_price} ${order.currency}\n📌 الحالة: ${
-            order.fulfillment_status || "قيد المعالجة"
-          }\n🚚 الناقل: ${order.shipping_lines?.[0]?.title || "غير محدد"}\n🔗 ${
-            order.shipping_lines?.[0]?.tracking_urls?.[0] || "لا يوجد رابط تتبع"
-          }`
-        );
+        replyText = `✅ تفاصيل الطلب #${orderId}:\n👤 العميل: ${
+          order.customer?.first_name || "غير معروف"
+        }\n💵 الإجمالي: ${order.total_price} ${order.currency}\n📌 الحالة: ${
+          order.fulfillment_status || "قيد المعالجة"
+        }`;
       } else {
-        await sendMessage(from, `⚠️ ما حصلت أي بيانات عن الطلب ${orderId}. تأكد من الرقم.`);
+        replyText = `⚠️ لم أتمكن من العثور على تفاصيل الطلب رقم ${orderId}. يرجى التأكد من الرقم.`;
       }
-      return;
     } else {
-      await sendMessage(from, "ℹ️ أرسل رقم الطلب عشان أتحقق لك.");
-      return;
+      replyText = "ℹ️ يرجى تزويدي برقم الطلب للتحقق.";
     }
   }
 
-  // 🔹 البحث عن منتجات
-  if (/منتج|منتجات|سلعة|قطع|شي|item/i.test(text)) {
-    const products = await searchProduct(text);
-    if (products.length > 0) {
-      const first = products[0];
-      await sendMessage(
-        from,
-        `✅ متوفر عندنا: ${first.title}\n💵 السعر: ${first.variants[0].price} ${first.variants[0].currency || "OMR"}`
-      );
-    } else {
-      await sendMessage(from, "🚫 هذا المنتج غير متوفر حالياً. تقدر تشوف العروض في قسم 🔥 العروض الساخنة.");
-    }
-    return;
+  // الرد الترحيبي الافتراضي
+  else {
+    replyText =
+      "👋 حيّاك الله في *eSelect | إي سيلكت*!\nكيف ممكن أساعدك اليوم بخصوص المنتجات أو الطلبات؟";
   }
 
-  // 🔹 رد افتراضي ذكي (OpenAI)
-  const aiReply = await askAI(text);
-  await sendMessage(from, aiReply);
+  // ✅ منع تكرار نفس الرد
+  if (replyText && lastReply[from] !== replyText) {
+    lastReply[from] = replyText;
+    await sendMessage(from, replyText);
+  }
 }
 
 // ==========================
@@ -184,13 +127,7 @@ app.post("/webhook", async (req, res) => {
     const from = data.data.from.replace("@c.us", "");
     const text = data.data.body.trim();
     console.log("📩 رسالة جديدة من", from, ":", text);
-
-    const lastContact = sessions[from]?.lastContact;
-    if (lastContact && Date.now() - lastContact < 30 * 60 * 1000) {
-      await sendMessage(from, "👨‍💼 الموظف المختص بيرد عليك قريباً، يرجى الانتظار.");
-    } else {
-      await handleMessage(from, text);
-    }
+    await handleMessage(from, text);
   }
   res.sendStatus(200);
 });
