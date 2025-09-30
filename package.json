@@ -1,19 +1,16 @@
 {
-  "name": "oman-gemini-whatsapp-bot",
+  "name": "eselect-whatsapp-bot",
   "version": "1.0.0",
-  "description": "Smart WhatsApp bot for customer service using Ultramsg and Gemini.",
-  "main": "server.js",
-  "type": "module",
+  "description": "WhatsApp bot for eSelect | إي سيلكت with Ultramsg, Shopify, and OpenAI",
+  "main": "server.cjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.cjs"
   },
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "openai": "^4.52.2",
-    "axios": "^1.7.2",
+    "axios": "^1.7.7",
     "body-parser": "^1.20.2",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "openai": "^4.56.0",
+    "dotenv": "^16.4.5"
   }
 }
