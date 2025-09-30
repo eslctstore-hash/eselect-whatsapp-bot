@@ -2,37 +2,116 @@ import express from 'express';
 import bodyParser from 'body-parser';
 import axios from 'axios';
 import 'dotenv/config';
-// استيراد مكتبة OpenAI
 import OpenAI from 'openai';
 
-// --- إعدادات أساسية ---
+// --- الإعدادات الأساسية ---
 const app = express();
 app.use(bodyParser.json());
-
 const PORT = process.env.PORT || 3000;
 
-// --- متغيرات البيئة (التي يجب وضعها في Render) ---
+// --- متغيرات البيئة ---
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const BOT_WHATSAPP_NUMBER = process.env.BOT_WHATSAPP_NUMBER; // رقم البوت لمنع الرد على النفس
+const BOT_WHATSAPP_NUMBER = process.env.BOT_WHATSAPP_NUMBER;
 const SUPPORT_PHONE_NUMBER = process.env.SUPPORT_PHONE_NUMBER;
-const YOUR_STORE_API_URL = process.env.YOUR_STORE_API_URL; 
+const YOUR_STORE_API_URL = process.env.YOUR_STORE_API_URL;
 const YOUR_STORE_API_TOKEN = process.env.YOUR_STORE_API_TOKEN;
 
 // --- إعداد OpenAI ---
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// --- ذاكرة مؤقتة لتخزين بيانات العملاء وحالة التوقف ---
+// --- الذاكرة المؤقتة ---
 const userSessions = new Map();
 const pausedUsers = new Map();
 
+// --- دوال التواصل مع API متجرك (Shopify) ---
 
-// --- دوال مساعدة ---
+async function findProduct(productName) {
+  console.log(`Searching for Shopify product: ${productName}`);
+  const shopifyUrl = `${YOUR_STORE_API_URL}/products.json?title=${encodeURIComponent(productName)}`;
+  
+  try {
+    const response = await axios.get(shopifyUrl, {
+      headers: {
+        'X-Shopify-Access-Token': YOUR_STORE_API_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    });
 
-// لإرسال الرسائل عبر Ultramsg
+    if (response.data && response.data.products.length > 0) {
+      const product = response.data.products[0];
+      const firstVariant = product.variants[0];
+      const isAvailable = firstVariant.inventory_quantity > 0;
+      
+      return `النتيجة: المنتج متوفر. الاسم: ${product.title}, السعر: ${firstVariant.price} ريال عماني, الحالة: ${isAvailable ? `متوفر بالمخزون (${firstVariant.inventory_quantity} قطعة)` : 'نفدت الكمية'}. رابط المنتج: https://eselect.store/products/${product.handle}`;
+    }
+    return "النتيجة: لم يتم العثور على منتج بهذا الاسم في المتجر.";
+  } catch (error) {
+    console.error("Error finding Shopify product:", error.response ? error.response.data : error.message);
+    return "النتيجة: حدث خطأ أثناء الاتصال ببيانات المتجر.";
+  }
+}
+
+async function getOrderDetails(orderName) {
+    console.log(`Searching for Shopify order: ${orderName}`);
+    // نزيل علامة # إذا أضافها المستخدم
+    const cleanOrderName = orderName.replace('#', '');
+    const shopifyUrl = `${YOUR_STORE_API_URL}/orders.json?name=${encodeURIComponent(cleanOrderName)}&status=any`;
+
+    try {
+        const response = await axios.get(shopifyUrl, {
+            headers: {
+                'X-Shopify-Access-Token': YOUR_STORE_API_TOKEN,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (response.data && response.data.orders.length > 0) {
+            const order = response.data.orders[0];
+            const trackingUrl = order.fulfillments.length > 0 ? (order.fulfillments[0].tracking_url || 'لا يوجد رابط تتبع بعد') : 'لم يتم الشحن بعد';
+            const fulfillmentStatus = order.fulfillment_status || 'لم تتم المعالجة';
+
+            return `النتيجة: حالة الطلب #${order.name} هي: ${fulfillmentStatus}. رابط التتبع: ${trackingUrl}.`;
+        }
+        return `النتيجة: لم يتم العثور على طلب بهذا الرقم.`;
+    } catch (error) {
+        console.error("Error finding Shopify order:", error.response ? error.response.data : error.message);
+        return "النتيجة: حدث خطأ أثناء الاتصال ببيانات المتجر.";
+    }
+}
+
+
+// --- تعريف الأدوات (Functions) التي سيستخدمها الذكاء الاصطناعي ---
+const tools = [
+  {
+    type: "function",
+    function: {
+      name: "findProduct",
+      description: "يبحث عن منتج معين في متجر eSelect ويعيد تفاصيله وسعره وحالة توفره.",
+      parameters: {
+        type: "object",
+        properties: { productName: { type: "string", description: "اسم المنتج المراد البحث عنه" } },
+        required: ["productName"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+        name: "getOrderDetails",
+        description: "يبحث عن حالة طلب معين باستخدام رقم الطلب الخاص بالعميل.",
+        parameters: {
+            type: "object",
+            properties: { orderName: { type: "string", description: "رقم الطلب الذي يزود به العميل، مثلا #1050" } },
+            required: ["orderName"],
+        },
+    },
+  },
+];
+
+
+// --- دوال التواصل مع واتساب ---
 async function sendWhatsappMessage(to, body) {
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
     try {
@@ -43,7 +122,6 @@ async function sendWhatsappMessage(to, body) {
     }
 }
 
-// لإرسال زر الاتصال
 async function sendCallButton(to, body, phoneNumber) {
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/buttons`;
     try {
@@ -54,109 +132,88 @@ async function sendCallButton(to, body, phoneNumber) {
     }
 }
 
-// للحصول على معلومات من API المتجر (مثال يجب تعديله)
-async function getOrderDetails(orderId) {
-    try {
-        const response = await axios.get(`${YOUR_STORE_API_URL}/orders/${orderId}`, {
-            headers: { 'Authorization': `Bearer ${YOUR_STORE_API_TOKEN}` }
-        });
-        return `حالة طلبك رقم ${orderId} هي: ${response.data.status}. شركة الشحن: ${response.data.shipping_company}. رابط التتبع: ${response.data.tracking_link || 'لا يوجد'}.`;
-    } catch (error) {
-        return `عذراً، لم أتمكن من العثور على طلب بالرقم ${orderId}. يرجى التأكد من الرقم والمحاولة مرة أخرى.`;
-    }
-}
-
-// --- نقطة استقبال الويب هوك من Ultramsg ---
+// --- نقطة استقبال الويب هوك الرئيسية ---
 app.post('/webhook', async (req, res) => {
     const messageData = req.body.data;
-    if (!messageData) { return res.sendStatus(200); }
+    if (!messageData) return res.sendStatus(200);
 
     const from = messageData.from;
     const messageBody = messageData.body;
-    
-    // --- FIX: تجاهل الرسائل التي تأتي من البوت نفسه (لمنع الحلقة المفرغة) ---
+
     if (from === BOT_WHATSAPP_NUMBER) {
         console.log("Ignoring echo message from self.");
         return res.sendStatus(200);
     }
 
-    // التحقق إذا كان المستخدم في وضع التوقف المؤقت
-    if (pausedUsers.has(from)) {
-        await sendWhatsappMessage(from, "أهلاً بك مجدداً. موظف الدعم الفني سيقوم بالرد على استفسارك في أقرب وقت ممكن. شكراً لانتظاركم.");
-        return res.sendStatus(200);
-    }
-    
-    // التعرف على رقم الطلب (3-6 أرقام)
-    const orderIdMatch = messageBody.match(/\b\d{3,6}\b/);
-    if (orderIdMatch) {
-        const orderId = orderIdMatch[0];
-        await sendWhatsappMessage(from, `شكراً لك، لقد استلمت رقم الطلب (${orderId}). جاري البحث عن تفاصيله...`);
-        const orderDetails = await getOrderDetails(orderId);
-        await sendWhatsappMessage(from, orderDetails);
-        
-        let session = userSessions.get(from) || {};
-        session.lastOrderId = orderId;
-        userSessions.set(from, session);
-        
-        return res.sendStatus(200);
-    }
-    
-    // التحقق من طلب التحدث مع موظف
-    if (messageBody.toLowerCase().includes("موظف") || messageBody.includes("دعم فني") || messageBody.includes("مساعدة")) {
-        pausedUsers.set(from, Date.now());
-        setTimeout(() => { pausedUsers.delete(from); }, 30 * 60 * 1000); // إيقاف لمدة 30 دقيقة
-        await sendCallButton(from, "لتسهيل خدمتك، يمكنك التواصل مباشرة مع موظف الدعم الفني بالضغط على الزر أدناه.", SUPPORT_PHONE_NUMBER);
-        return res.sendStatus(200);
-    }
-    
-    // إذا لم يكن هناك طلب محدد، استخدم OpenAI للرد
     try {
-        const isNewCustomer = !userSessions.has(from);
-        if (isNewCustomer) {
+        if (!userSessions.has(from)) {
             userSessions.set(from, { history: [] });
         }
         const session = userSessions.get(from);
 
-        // بناء سجل المحادثة لـ OpenAI
         const messages = [
-            {
-                role: "system",
-                content: `أنت مساعد خدمة عملاء ذكي لمتجر إلكتروني في سلطنة عمان. اسمك "مساعد المتجر الذكي". مهمتك هي مساعدة العملاء بأسلوب ودود ومحترف وباللهجة العمانية فقط. كن مقنعاً ولطيفاً وحاول كسب رضا العميل. إذا كان السؤال معقداً أو طلب العميل موظفاً، قم بعرض خيار الاتصال بالدعم. معلومات عن المتجر: [ضع هنا معلومات متجرك: سياسة الشحن، الاسترجاع، طرق الدفع، إلخ]`
-            },
+            { role: "system", content: "أنت مساعد خدمة عملاء ذكي لمتجر eSelect في سلطنة عمان. استخدم الأدوات المتاحة لك للبحث عن المنتجات والطلبات قبل الإجابة. ابحث في صفحات المتجر و السياسات و طرق الدفع و الاسئلة الشائعة تحدث باللهجة العمانية فقط بأسلوب ودود و أكسب الزيون بالمعالمة الطيبة. اسم المتجر: eSelect. الموقع: eselect.store" },
             ...session.history,
-            {
-                role: "user",
-                content: messageBody
-            }
+            { role: "user", content: messageBody }
         ];
-        
-        // استدعاء النموذج
-        const completion = await openai.chat.completions.create({
+
+        const initialResponse = await openai.chat.completions.create({
+            model: "gpt-4o",
             messages: messages,
-            model: "gpt-4o", // gpt-4o هو الأحدث والأفضل حالياً
+            tools: tools,
+            tool_choice: "auto",
         });
+
+        const responseMessage = initialResponse.choices[0].message;
+        const toolCalls = responseMessage.tool_calls;
+
+        if (toolCalls) {
+            session.history.push(responseMessage);
+            const availableFunctions = { findProduct, getOrderDetails };
+            
+            for (const toolCall of toolCalls) {
+                const functionName = toolCall.function.name;
+                const functionToCall = availableFunctions[functionName];
+                const functionArgs = JSON.parse(toolCall.function.arguments);
+                const functionResponse = await functionToCall(functionArgs[Object.keys(functionArgs)[0]]);
+                
+                session.history.push({
+                    tool_call_id: toolCall.id,
+                    role: "tool",
+                    name: functionName,
+                    content: functionResponse,
+                });
+            }
+
+            const finalResponse = await openai.chat.completions.create({
+                model: "gpt-4o",
+                messages: session.history, // نرسل السجل المحدث
+            });
+
+            const finalMessage = finalResponse.choices[0].message.content;
+            session.history.push({ role: 'assistant', content: finalMessage });
+            await sendWhatsappMessage(from, finalMessage);
+
+        } else {
+            const aiResponse = responseMessage.content;
+            session.history.push({ role: 'user', content: messageBody });
+            session.history.push({ role: 'assistant', content: aiResponse });
+            await sendWhatsappMessage(from, aiResponse);
+        }
         
-        const aiResponse = completion.choices[0].message.content;
-        
-        // تحديث سجل المحادثة
-        session.history.push({ role: "user", content: messageBody });
-        session.history.push({ role: "assistant", content: aiResponse });
-        if(session.history.length > 10) { // أبقِ السجل قصيراً
-            session.history.splice(0, 2);
+        if(session.history.length > 10) {
+            session.history.splice(0, 4);
         }
 
-        await sendWhatsappMessage(from, aiResponse);
-
     } catch (error) {
-        console.error("Error with OpenAI API:", error.response ? error.response.data : error);
-        await sendWhatsappMessage(from, "عذراً، أواجه مشكلة فنية في الوقت الحالي. يرجى المحاولة مرة أخرى لاحقاً.");
+        console.error("Error in webhook processing:", error.response ? error.response.data : error);
+        await sendWhatsappMessage(from, "عذراً، حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.");
     }
     
     res.sendStatus(200);
 });
 
-
-// --- نقطة بداية تشغيل السيرفر ---
+// --- تشغيل السيرفر ---
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
