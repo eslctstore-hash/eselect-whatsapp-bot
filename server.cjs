@@ -1,36 +1,47 @@
-// server.js
 const express = require("express");
 const axios = require("axios");
 require("dotenv").config();
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// ✅ متغيرات البيئة
+// ================== ENV VARS ==================
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
+const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL; // https://xxxx.myshopify.com
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 
-// ✅ Webhook من UltraMsg
+// ================== TEST ROUTE ==================
+app.get("/", (req, res) => {
+  res.send("🚀 WhatsApp bot is running - eSelect | إي سيلكت");
+});
+
+// ================== WEBHOOK ==================
 app.post("/webhook", async (req, res) => {
   try {
-    const data = req.body;
+    const body = req.body;
 
-    if (!data || !data.data || !data.data.message) {
+    if (!body || !body.data || !body.data.body) {
+      console.log("❌ Webhook بدون رسالة:", body);
       return res.sendStatus(200);
     }
 
-    const from = data.data.from;   // رقم العميل
-    const message = data.data.message; // نص الرسالة
+    const from = body.data.from.replace("@c.us", ""); // رقم العميل
+    const message = body.data.body.trim(); // نص الرسالة
 
     console.log(`📩 رسالة من ${from}: ${message}`);
 
-    // ✨ الرد من ChatGPT
-    const gptReply = await askChatGPT(message);
+    // ✅ ردود سريعة على التحيات
+    const quickReply = handleQuickReplies(message);
+    if (quickReply) {
+      await sendWhatsAppMessage(from, quickReply);
+      return res.sendStatus(200);
+    }
 
-    // ✨ إرسال الرد للعميل
+    // ✨ الرد من ChatGPT + Shopify
+    const gptReply = await askChatGPT(message, from);
     await sendWhatsAppMessage(from, gptReply);
 
     res.sendStatus(200);
@@ -40,8 +51,24 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ================== QUICK REPLIES ==================
+function handleQuickReplies(msg) {
+  const normalized = msg.toLowerCase();
 
-// ✅ جلب المنتجات من Shopify
+  const greetings = ["مرحبا", "مرحبا", "اهلا", "هلا", "hi", "hello"];
+  const salam = ["السلام عليكم", "سلام عليكم", "السلام", "سلام"];
+
+  if (greetings.includes(normalized)) {
+    return "أهلاً وسهلاً 👋، كيف أقدر أخدمك اليوم؟";
+  }
+  if (salam.includes(normalized)) {
+    return "وعليكم السلام ورحمة الله وبركاته 🌹، تفضل كيف أقدر أساعدك؟";
+  }
+
+  return null; // يرسل للـ ChatGPT لو مش موجود هنا
+}
+
+// ================== SHOPIFY HELPERS ==================
 async function getShopifyProducts() {
   try {
     const response = await axios.get(
@@ -57,6 +84,7 @@ async function getShopifyProducts() {
     return response.data.products.map(p => ({
       title: p.title,
       price: p.variants[0]?.price,
+      stock: p.variants[0]?.inventory_quantity,
       url: `https://${SHOPIFY_STORE_URL.replace("https://", "").replace("http://", "")}/products/${p.handle}`
     }));
   } catch (err) {
@@ -65,7 +93,6 @@ async function getShopifyProducts() {
   }
 }
 
-// ✅ جلب السياسات
 async function getShopifyPolicies() {
   try {
     const response = await axios.get(
@@ -80,7 +107,7 @@ async function getShopifyPolicies() {
 
     return response.data.policies.map(p => ({
       title: p.title,
-      body: p.body
+      body: p.body.slice(0, 200)
     }));
   } catch (err) {
     console.error("❌ Shopify policies error:", err.response?.data || err.message);
@@ -88,11 +115,10 @@ async function getShopifyPolicies() {
   }
 }
 
-// ✅ جلب الصفحات
 async function getShopifyPages() {
   try {
     const response = await axios.get(
-      `${SHOPIFY_STORE_URL}/admin/api/2024-07/pages.json?limit=5`,
+      `${SHOPIFY_STORE_URL}/admin/api/2024-07/pages.json?limit=3`,
       {
         headers: {
           "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
@@ -103,7 +129,7 @@ async function getShopifyPages() {
 
     return response.data.pages.map(p => ({
       title: p.title,
-      body: p.body_html.replace(/<[^>]+>/g, "").slice(0, 300) // نص مختصر
+      body: p.body_html.replace(/<[^>]+>/g, "").slice(0, 200)
     }));
   } catch (err) {
     console.error("❌ Shopify pages error:", err.response?.data || err.message);
@@ -111,11 +137,10 @@ async function getShopifyPages() {
   }
 }
 
-// ✅ جلب القوائم
-async function getShopifyNavigation() {
+async function getOrderStatus(orderId) {
   try {
     const response = await axios.get(
-      `${SHOPIFY_STORE_URL}/admin/api/2024-07/menus.json`,
+      `${SHOPIFY_STORE_URL}/admin/api/2024-07/orders/${orderId}.json`,
       {
         headers: {
           "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
@@ -124,38 +149,41 @@ async function getShopifyNavigation() {
       }
     );
 
-    return response.data.menus.map(m => ({
-      title: m.title,
-      items: m.items.map(i => i.title).join(", ")
-    }));
+    const order = response.data.order;
+    return `📦 حالة طلبك #${order.id}: ${order.fulfillment_status || "قيد المعالجة"} | الدفع: ${order.financial_status}`;
   } catch (err) {
-    console.error("❌ Shopify navigation error:", err.response?.data || err.message);
-    return [];
+    console.error("❌ Shopify order error:", err.response?.data || err.message);
+    return "لم أتمكن من العثور على تفاصيل الطلب، تأكد من رقم الطلب.";
   }
 }
 
-// ✅ طلب من ChatGPT مع سياق كامل من المتجر
-async function askChatGPT(userMessage) {
+// ================== CHATGPT ==================
+async function askChatGPT(userMessage, userNumber) {
   try {
-    const [products, policies, pages, menus] = await Promise.all([
+    const [products, policies, pages] = await Promise.all([
       getShopifyProducts(),
       getShopifyPolicies(),
-      getShopifyPages(),
-      getShopifyNavigation()
+      getShopifyPages()
     ]);
+
+    // لو فيه رقم طلب
+    let orderReply = "";
+    const orderIdMatch = userMessage.match(/\d{6,}/);
+    if (orderIdMatch) {
+      orderReply = await getOrderStatus(orderIdMatch[0]);
+    }
 
     const context = `
 🛒 المنتجات:
-${products.map(p => `- ${p.title}: ${p.price} OMR (${p.url})`).join("\n")}
+${products.map(p => `- ${p.title}: ${p.price} OMR | المخزون: ${p.stock} | ${p.url}`).join("\n")}
 
 📜 السياسات:
-${policies.map(p => `- ${p.title}: ${p.body.slice(0, 150)}...`).join("\n")}
+${policies.map(p => `- ${p.title}: ${p.body}...`).join("\n")}
 
 📄 الصفحات:
 ${pages.map(p => `- ${p.title}: ${p.body}`).join("\n")}
 
-📂 الأقسام:
-${menus.map(m => `- ${m.title}: ${m.items}`).join("\n")}
+${orderReply ? `\n🔎 حالة الطلب:\n${orderReply}` : ""}
 `;
 
     const response = await axios.post(
@@ -166,14 +194,16 @@ ${menus.map(m => `- ${m.title}: ${m.items}`).join("\n")}
           {
             role: "system",
             content: `
-أنت مساعد دردشة لمتجر eSelect | إي سيلكت.
-- تجاوب بسرعة واحترافية باللهجة العمانية أو العربية الفصحى.
-- تعطي معلومات دقيقة عن المنتجات والأسعار والسياسات.
-- لو العميل يسأل شيء حساس (زي معلومات شخصية أو مالية)، تجاوب بأدب أنك ما تقدر تعطيه.
-- اجعل ردودك ودية، قصيرة وواضحة.
+أنت موظف خدمة عملاء افتراضي لمتجر eSelect | إي سيلكت.
+- رد بذكاء واحترافية كأنك موظف بشري.
+- رحّب بالعميل بطريقة ودودة باللهجة العمانية أو العربية الفصحى.
+- إذا كان السؤال تحية فقط → رد بتحية مناسبة.
+- إذا كان عن المنتجات أو الأسعار أو السياسات → اعتمد على البيانات المرفقة.
+- إذا كان عن الطلبات → اعرض حالة الطلب بوضوح.
+- اجعل الردود قصيرة، واضحة، وتركز على ما طلبه العميل فقط.
 `
           },
-          { role: "user", content: `رسالة العميل: ${userMessage}\n\nمحتوى المتجر:\n${context}` }
+          { role: "user", content: `رسالة العميل: ${userMessage}\n\nبيانات المتجر:\n${context}` }
         ],
       },
       {
@@ -191,7 +221,7 @@ ${menus.map(m => `- ${m.title}: ${m.items}`).join("\n")}
   }
 }
 
-// ✅ إرسال رسالة عبر UltraMsg
+// ================== ULTRAMSG ==================
 async function sendWhatsAppMessage(to, text) {
   try {
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
@@ -206,5 +236,6 @@ async function sendWhatsAppMessage(to, text) {
   }
 }
 
+// ================== START ==================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 WhatsApp Bot running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Bot running on port ${PORT}`));
