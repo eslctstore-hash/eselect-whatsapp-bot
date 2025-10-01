@@ -1,5 +1,5 @@
 // server.cjs
-
+require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
 const bodyParser = require("body-parser");
@@ -7,154 +7,129 @@ const bodyParser = require("body-parser");
 const app = express();
 app.use(bodyParser.json());
 
-// ==========================
-// Environment Variables
-// ==========================
-const ULTRAMSG_INSTANCE = process.env.ULTRAMSG_INSTANCE;
-const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
+// ==================== ENV VARIABLES ====================
+const PORT = process.env.PORT || 3000;
 
-const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
-const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
-
-const BOT_WHATSAPP_NUMBER = process.env.BOT_WHATSAPP_NUMBER;
-const SUPPORT_NUMBER = process.env.SUPPORT_NUMBER;
-
+// OpenRouter
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
-// ==========================
-// Memory
-// ==========================
-const sessions = {};
+// Ultramsg
+const ULTRAMSG_INSTANCE = process.env.ULTRAMSG_INSTANCE;
+const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
+const BOT_WHATSAPP_NUMBER = process.env.BOT_WHATSAPP_NUMBER;
 
-// ==========================
-// WhatsApp Send
-// ==========================
-async function sendMessage(to, body) {
+// Shopify
+const SHOPIFY_STORE_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
+const SHOPIFY_PASSWORD = process.env.SHOPIFY_PASSWORD; // Admin API Access Token
+// ========================================================
+
+// Send WhatsApp message via Ultramsg
+async function sendMessage(to, message) {
   try {
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE}/messages/chat`;
-    const res = await axios.post(url, {
+    const payload = {
       token: ULTRAMSG_TOKEN,
-      to,
-      body,
-    });
-    console.log("✅ Sent via Ultramsg:", res.data);
+      to: to,
+      body: message,
+    };
+    await axios.post(url, payload);
+    console.log(`✅ Sent via Ultramsg to ${to}: ${message}`);
   } catch (err) {
-    console.error("❌ Send error:", err.response?.data || err.message);
+    console.error("❌ Error sending message:", err.message);
   }
 }
 
-// ==========================
-// Shopify API (Order)
-// ==========================
-async function fetchOrder(orderId) {
+// Get order info from Shopify
+async function getOrderInfo(orderNumber) {
   try {
-    const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2025-01/orders/${orderId}.json`;
-    const res = await axios.get(url, {
-      headers: { "X-Shopify-Access-Token": SHOPIFY_API_KEY },
+    const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2025-01/orders.json?name=${orderNumber}`;
+    const response = await axios.get(url, {
+      headers: {
+        "X-Shopify-Access-Token": SHOPIFY_PASSWORD,
+        "Content-Type": "application/json",
+      },
     });
-    return res.data.order;
+
+    if (response.data.orders && response.data.orders.length > 0) {
+      const order = response.data.orders[0];
+      let tracking = "ما فيه معلومات تتبع حالياً";
+
+      if (order.fulfillments && order.fulfillments.length > 0) {
+        const f = order.fulfillments[0];
+        if (f.tracking_number && f.tracking_url) {
+          tracking = `رقم التتبع: ${f.tracking_number}\nرابط: ${f.tracking_url}`;
+        }
+      }
+
+      return `📦 تفاصيل طلبك #${order.name}\nالحالة: ${order.financial_status} / ${order.fulfillment_status}\n${tracking}`;
+    } else {
+      return `❌ ما حصلت أي طلب بهذا الرقم (${orderNumber}).`;
+    }
   } catch (err) {
-    console.error("❌ Shopify fetch error:", err.response?.data || err.message);
-    return null;
+    console.error("❌ Shopify API error:", err.response?.data || err.message);
+    return "⚠️ صار خطأ يوم حاولت أجيب بيانات الطلب.";
   }
 }
 
-// ==========================
-// OpenRouter AI Call
-// ==========================
-async function askAI(prompt) {
+// AI response handler using OpenRouter
+async function getAIResponse(userMessage) {
   try {
-    const res = await axios.post(
+    const response = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
       {
-        model: "openai/gpt-4o-mini", // ممكن تغييره لأي موديل متاح
+        model: "gpt-4o-mini", // تقدر تغير الموديل من OpenRouter (مثلا mistral, llama, claude...)
         messages: [
-          { role: "system", content: "انت مساعد ودود باللهجة العمانية، ترد باحترافية وتدعم متجر eSelect." },
-          { role: "user", content: prompt },
+          {
+            role: "system",
+            content: `انت مساعد ودود ولطيف باللهجة العمانية، ترد على استفسارات العملاء حول متجر eSelect.`,
+          },
+          {
+            role: "user",
+            content: userMessage,
+          },
         ],
       },
       {
         headers: {
-          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-          "HTTP-Referer": "https://eselect.store",
-          "X-Title": "eSelect WhatsApp Bot"
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
         },
       }
     );
-    return res.data.choices[0].message.content;
+
+    return response.data.choices[0].message.content;
   } catch (err) {
     console.error("❌ OpenRouter error:", err.response?.data || err.message);
-    return "⚠️ النظام مزدحم شوي، جرب مرة ثانية بعد دقائق 🙏";
+    return "⚠️ صار خلل مؤقت في النظام. حاول مرة ثانية.";
   }
 }
 
-// ==========================
-// Handle Incoming Message
-// ==========================
-async function handleMessage(from, text, msgId) {
-  // Prevent bot reply to itself or duplicate msg
-  if (from === BOT_WHATSAPP_NUMBER) return;
-  if (sessions[from]?.lastMessageId === msgId) return;
-
-  if (!sessions[from]) {
-    sessions[from] = { human: false, lastOrder: null, lastMessageId: msgId };
-    await sendMessage(from, "👋 هلا وسهلا بك في eSelect | إي سيلكت! كيف أقدر أخدمك اليوم؟");
-    return;
-  }
-
-  sessions[from].lastMessageId = msgId;
-
-  // إذا العميل طلب موظف
-  if (/(موظف|بشر|أحد|خدمة)/i.test(text)) {
-    sessions[from].human = true;
-    await sendMessage(from, "👨‍💼 تم تحويلك للموظف المختص، يرجى الانتظار لين يرد عليك.");
-    return;
-  }
-
-  // استعلام عن طلب
-  if (/(طلب|طلبي|طلبيتي|اوردري|اوردر)/i.test(text)) {
-    const match = text.match(/\d{3,6}/);
-    if (match) {
-      const orderId = match[0];
-      const order = await fetchOrder(orderId);
-      if (order) {
-        await sendMessage(from,
-          `📦 تفاصيل الطلب #${orderId}:\n👤 ${order.customer?.first_name || "العميل"}\n💵 ${order.total_price} ${order.currency}\n📌 الحالة: ${order.fulfillment_status || "قيد المعالجة"}`
-        );
-      } else {
-        await sendMessage(from, `⚠️ ما حصلت تفاصيل الطلب رقم ${orderId}. تأكد من الرقم.`);
-      }
-      return;
-    } else {
-      await sendMessage(from, "ℹ️ عطنا رقم الطلب علشان أتحقق لك.");
-      return;
-    }
-  }
-
-  // أي رسالة أخرى => للذكاء الاصطناعي
-  const reply = await askAI(text);
-  await sendMessage(from, reply);
-}
-
-// ==========================
-// Webhook
-// ==========================
+// Handle incoming messages
 app.post("/webhook", async (req, res) => {
-  const data = req.body;
-  if (data?.data?.from && data?.data?.body) {
-    const from = data.data.from.replace("@c.us", "");
-    const text = data.data.body.trim();
-    const msgId = data.data.id || Date.now();
-    console.log("📩 رسالة جديدة من", from, ":", text);
-    await handleMessage(from, text, msgId);
+  try {
+    const data = req.body;
+    const from = data.from;
+    const message = data.body?.trim();
+
+    console.log(`📩 رسالة جديدة من ${from} : ${message}`);
+
+    // Check if it's an order number (digits only)
+    if (/^\d+$/.test(message)) {
+      const orderInfo = await getOrderInfo(message);
+      await sendMessage(from, orderInfo);
+    } else {
+      const aiReply = await getAIResponse(message);
+      await sendMessage(from, aiReply);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Webhook error:", err.message);
+    res.sendStatus(500);
   }
-  res.sendStatus(200);
 });
 
-// ==========================
-// Start Server
-// ==========================
-const PORT = process.env.PORT || 10000;
+// Start server
 app.listen(PORT, () => {
   console.log(`🚀 WhatsApp bot running on port ${PORT}`);
 });
