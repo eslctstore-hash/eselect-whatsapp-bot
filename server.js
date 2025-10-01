@@ -9,9 +9,10 @@ app.use(express.urlencoded({ extended: true }));
 // ================== ENV VARS ==================
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL; // https://xxxx.myshopify.com
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL; 
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const SUPPORT_NUMBER = process.env.SUPPORT_NUMBER || "96894000000"; // رقم الدعم البشري
 
 // ================== TEST ROUTE ==================
 app.get("/", (req, res) => {
@@ -40,10 +41,10 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ✨ الرد من ChatGPT + Shopify
-    const gptReply = await askChatGPT(message, from);
-    await sendWhatsAppMessage(from, gptReply);
+    // ✨ الرد من OpenRouter + Shopify
+    const reply = await askOpenRouter(message, from);
 
+    await sendWhatsAppMessage(from, reply);
     res.sendStatus(200);
   } catch (err) {
     console.error("❌ Error in webhook:", err.message);
@@ -55,17 +56,17 @@ app.post("/webhook", async (req, res) => {
 function handleQuickReplies(msg) {
   const normalized = msg.toLowerCase();
 
-  const greetings = ["مرحبا", "مرحبا", "اهلا", "هلا", "hi", "hello"];
+  const greetings = ["مرحبا", "اهلا", "هلا", "hi", "hello"];
   const salam = ["السلام عليكم", "سلام عليكم", "السلام", "سلام"];
 
   if (greetings.includes(normalized)) {
-    return "أهلاً وسهلاً 👋، كيف أقدر أخدمك اليوم؟";
+    return "👋 أهلاً وسهلاً بك في eSelect | إي سيلكت! كيف أقدر أخدمك اليوم؟";
   }
   if (salam.includes(normalized)) {
-    return "وعليكم السلام ورحمة الله وبركاته 🌹، تفضل كيف أقدر أساعدك؟";
+    return "🌹 وعليكم السلام ورحمة الله وبركاته، تفضل كيف أقدر أساعدك؟";
   }
 
-  return null; // يرسل للـ ChatGPT لو مش موجود هنا
+  return null;
 }
 
 // ================== SHOPIFY HELPERS ==================
@@ -150,15 +151,15 @@ async function getOrderStatus(orderId) {
     );
 
     const order = response.data.order;
-    return `📦 حالة طلبك #${order.id}: ${order.fulfillment_status || "قيد المعالجة"} | الدفع: ${order.financial_status}`;
+    return `📦 حالة طلبك #${order.id}: ${order.fulfillment_status || "قيد المعالجة"} | 💳 الدفع: ${order.financial_status}`;
   } catch (err) {
     console.error("❌ Shopify order error:", err.response?.data || err.message);
     return "لم أتمكن من العثور على تفاصيل الطلب، تأكد من رقم الطلب.";
   }
 }
 
-// ================== CHATGPT ==================
-async function askChatGPT(userMessage, userNumber) {
+// ================== OPENROUTER ==================
+async function askOpenRouter(userMessage, userNumber) {
   try {
     const [products, policies, pages] = await Promise.all([
       getShopifyProducts(),
@@ -187,20 +188,21 @@ ${orderReply ? `\n🔎 حالة الطلب:\n${orderReply}` : ""}
 `;
 
     const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
+      "https://openrouter.ai/api/v1/chat/completions",
       {
-        model: "gpt-4o-mini",
+        model: "openai/gpt-4o-mini", // بإمكانك تغييره لموديلات أخرى مثل claude-3.5
         messages: [
           {
             role: "system",
             content: `
 أنت موظف خدمة عملاء افتراضي لمتجر eSelect | إي سيلكت.
 - رد بذكاء واحترافية كأنك موظف بشري.
-- رحّب بالعميل بطريقة ودودة باللهجة العمانية أو العربية الفصحى.
+- رحّب بالعميل باللهجة العمانية أو العربية الفصحى.
 - إذا كان السؤال تحية فقط → رد بتحية مناسبة.
 - إذا كان عن المنتجات أو الأسعار أو السياسات → اعتمد على البيانات المرفقة.
 - إذا كان عن الطلبات → اعرض حالة الطلب بوضوح.
-- اجعل الردود قصيرة، واضحة، وتركز على ما طلبه العميل فقط.
+- إذا كان العميل مرتبكًا → وجّهه للتواصل مع الدعم البشري على الرقم ${SUPPORT_NUMBER}.
+- اجعل الردود قصيرة، ودودة، وتركز على ما طلبه العميل فقط.
 `
           },
           { role: "user", content: `رسالة العميل: ${userMessage}\n\nبيانات المتجر:\n${context}` }
@@ -208,16 +210,16 @@ ${orderReply ? `\n🔎 حالة الطلب:\n${orderReply}` : ""}
       },
       {
         headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
           "Content-Type": "application/json",
         },
       }
     );
 
-    return response.data.choices[0].message.content;
+    return response.data.choices[0].message.content || "🙏 عذرًا، لم أتمكن من الرد. تواصل معنا على الدعم البشري.";
   } catch (err) {
-    console.error("❌ ChatGPT error:", err.response?.data || err.message);
-    return "عذرًا، صار خطأ مؤقت. حاول مرة ثانية 🙏";
+    console.error("❌ OpenRouter error:", err.response?.data || err.message);
+    return "🚨 صار خطأ مؤقت. تواصل معنا على الدعم البشري.";
   }
 }
 
