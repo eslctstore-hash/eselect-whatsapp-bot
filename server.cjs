@@ -1,194 +1,131 @@
-// server.cjs
-
+// server.js
 const express = require("express");
 const axios = require("axios");
-const bodyParser = require("body-parser");
+require("dotenv").config();
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json());
 
-// ==========================
-// إعداد المتغيرات من .env
-// ==========================
-const ULTRAMSG_INSTANCE = process.env.ULTRAMSG_INSTANCE;
+// ✅ بيئة من ملف .env
+const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
+const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE; // مثال: eselect.store
-const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
-const SHOPIFY_PASSWORD = process.env.SHOPIFY_PASSWORD;
-
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-
-const SUPPORT_NUMBER = "96894682186"; // رقم الدعم الفني
-
-// ==========================
-// تخزين الجلسات
-// ==========================
-const sessions = {};
-
-// ==========================
-// إرسال رسالة واتساب
-// ==========================
-async function sendMessage(to, body) {
+// ✅ Webhook من UltraMsg
+app.post("/webhook", async (req, res) => {
   try {
-    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE}/messages/chat`;
-    const res = await axios.post(url, {
-      token: ULTRAMSG_TOKEN,
-      to,
-      body,
-    });
-    console.log("✅ Sent via Ultramsg:", res.data);
+    const data = req.body;
+
+    if (!data || !data.data || !data.data.message) {
+      return res.sendStatus(200);
+    }
+
+    const from = data.data.from;   // رقم العميل
+    const message = data.data.message; // رسالة العميل
+
+    console.log(`📩 رسالة من ${from}: ${message}`);
+
+    // ✨ الرد من ChatGPT (مع منتجات Shopify)
+    const gptReply = await askChatGPT(message);
+
+    // ✨ إرسال الرد للعميل
+    await sendWhatsAppMessage(from, gptReply);
+
+    res.sendStatus(200);
   } catch (err) {
-    console.error("❌ Send error:", err.response?.data || err.message);
+    console.error("❌ Error in webhook:", err.message);
+    res.sendStatus(500);
+  }
+});
+
+// ✅ جلب المنتجات من Shopify
+async function getShopifyProducts() {
+  try {
+    const response = await axios.get(
+      `${SHOPIFY_STORE_URL}/admin/api/2024-07/products.json?limit=5`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    return response.data.products.map(p => ({
+      title: p.title,
+      price: p.variants[0]?.price,
+      url: `https://${SHOPIFY_STORE_URL.replace("https://", "").replace("http://", "")}/products/${p.handle}`
+    }));
+  } catch (err) {
+    console.error("❌ Shopify error:", err.response?.data || err.message);
+    return [];
   }
 }
 
-// ==========================
-// استدعاء OpenRouter للذكاء الاصطناعي
-// ==========================
-async function askAI(userMessage) {
+// ✅ طلب من ChatGPT مع سياق المتجر
+async function askChatGPT(userMessage) {
   try {
-    const safeMessage =
-      userMessage && typeof userMessage === "string" && userMessage.trim() !== ""
-        ? userMessage.trim()
-        : "مرحبا"; // ✅ fallback
+    const products = await getShopifyProducts();
 
     const response = await axios.post(
-      "https://openrouter.ai/api/v1/chat/completions",
+      "https://api.openai.com/v1/chat/completions",
       {
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
-            content:
-              "انت بوت خدمة عملاء لمتجر eSelect | إي سيلكت. رد باللهجة العمانية، كن ودود وذكي، ساعد في الطلبات، المنتجات، الشحن، الدفع، الضمان، المنتجات الرقمية والكروت، واشرح التفاصيل باحترافية."
+            content: `
+أنت مساعد دردشة لمتجر eSelect | إي سيلكت.
+تجاوب بسرعة واحترافية باللهجة العمانية (أو العربية الفصحى عند الحاجة).
+مهمتك:
+- تشرح للعميل المنتجات والأسعار بشكل مبسط.
+- تذكر روابط المنتجات عند الحاجة.
+- تعطي معلومات عن الدفع عند الاستلام، التحويل البنكي، باي بال.
+- توضح سياسات الشحن والإرجاع حسب ما هو في الموقع.
+- تعيد صياغة الردود بشكل ودّي وواضح.
+`
           },
           {
             role: "user",
-            content: safeMessage
+            content: `
+رسالة العميل: ${userMessage}
+قائمة أحدث المنتجات:
+${products.map(p => `- ${p.title}: ${p.price} OMR (${p.url})`).join("\n")}
+`
           }
-        ]
+        ],
       },
       {
         headers: {
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
           "Content-Type": "application/json",
-        }
+        },
       }
     );
 
-    const reply =
-      response.data.choices?.[0]?.message?.content ||
-      "⚠️ صار خلل مؤقت في النظام. حاول مرة ثانية.";
-    return reply;
+    return response.data.choices[0].message.content;
   } catch (err) {
-    console.error("❌ OpenRouter error:", err.response?.data || err.message);
-    return "⚠️ صار خلل مؤقت في النظام. حاول مرة ثانية.";
+    console.error("❌ Error from ChatGPT:", err.response?.data || err.message);
+    return "عذرًا، صار خطأ مؤقت. حاول مرة ثانية 🙏";
   }
 }
 
-// ==========================
-// جلب الطلب من Shopify
-// ==========================
-async function fetchOrder(orderId) {
+// ✅ إرسال رسالة عبر UltraMsg
+async function sendWhatsAppMessage(to, text) {
   try {
-    const url = `https://${SHOPIFY_API_KEY}:${SHOPIFY_PASSWORD}@${SHOPIFY_STORE}/admin/api/2025-01/orders/${orderId}.json`;
-    const res = await axios.get(url);
-    return res.data.order;
+    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
+    await axios.post(url, {
+      token: ULTRAMSG_TOKEN,
+      to,
+      body: text,
+    });
+    console.log(`✅ أُرسلت رسالة إلى ${to}: ${text}`);
   } catch (err) {
-    console.error("❌ Shopify fetch error:", err.response?.data || err.message);
-    return null;
+    console.error("❌ Error sending WhatsApp message:", err.response?.data || err.message);
   }
 }
 
-// ==========================
-// معالجة الرسائل
-// ==========================
-async function handleMessage(from, text) {
-  if (!sessions[from]) {
-    sessions[from] = { human: false, lastOrder: null };
-    await sendMessage(
-      from,
-      "👋 هلا وسهلا بك في eSelect | إي سيلكت! كيف أقدر أخدمك اليوم؟"
-    );
-    return;
-  }
-
-  // التحقق إذا العميل يطلب موظف بشري
-  if (/(موظف|بشر|شخص|أحد|خدمة)/i.test(text)) {
-    if (!sessions[from].human) {
-      sessions[from].human = true;
-      await sendMessage(
-        from,
-        "📞 تم تحويلك لأحد موظفينا المختصين. تقدر تتصل مباشرة بالضغط على زر الاتصال.\nيرجى الانتظار لحين الرد."
-      );
-    }
-    return;
-  }
-
-  // التحقق من الاستفسار عن الطلب
-  if (/(طلب|طلبي|طلبيتي|طلبية|اوردري|اوردر)/i.test(text)) {
-    const match = text.match(/\d{3,6}/); // رقم طلب
-    if (match) {
-      const orderId = match[0];
-      sessions[from].lastOrder = orderId;
-
-      await sendMessage(from, `📦 تم استلام رقم الطلب: ${orderId}\n⏳ جاري التحقق...`);
-
-      const order = await fetchOrder(orderId);
-      if (order) {
-        await sendMessage(
-          from,
-          `✅ تفاصيل الطلب #${orderId}:\n👤 العميل: ${order.customer?.first_name || "غير معروف"}\n💵 الإجمالي: ${order.total_price} ${order.currency}\n📌 الحالة: ${order.fulfillment_status || "قيد المعالجة"}`
-        );
-      } else {
-        await sendMessage(from, `⚠️ ما حصلت تفاصيل الطلب رقم ${orderId}. تأكد من الرقم.`);
-      }
-      return;
-    } else {
-      await sendMessage(from, "ℹ️ عطنا رقم الطلب علشان أتحقق لك.");
-      return;
-    }
-  }
-
-  // 🔹 الرد بالذكاء الاصطناعي على أي استفسار آخر
-  const aiReply = await askAI(text);
-  await sendMessage(from, aiReply);
-}
-
-// ==========================
-// Webhook من Ultramsg
-// ==========================
-app.post("/webhook", async (req, res) => {
-  try {
-    const data = req.body?.data || req.body;
-    const from = data.from?.replace("@c.us", "") || null;
-    let text = data.body;
-
-    if (!text || typeof text !== "string" || text.trim() === "") {
-      console.log("⚠️ استقبلت رسالة فاضية/غير صالحة من:", from);
-      text = "مرحبا"; // ✅ fallback
-    } else {
-      text = text.trim();
-    }
-
-    console.log("📩 رسالة جديدة من", from, ":", text);
-
-    if (from) {
-      await handleMessage(from, text);
-    } else {
-      console.log("⚠️ رسالة بدون مرسل تم تجاهلها");
-    }
-  } catch (err) {
-    console.error("❌ Webhook error:", err.message);
-  }
-  res.sendStatus(200);
-});
-
-// ==========================
-// تشغيل السيرفر
-// ==========================
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`🚀 WhatsApp bot running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 WhatsApp Bot running on port ${PORT}`));
