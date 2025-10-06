@@ -1,171 +1,212 @@
+// ==========================
+// 🧠 eSelect WhatsApp Bot v2.1 (Stable)
+// Powered by Ultramsg + ChatGPT + Shopify
+// ==========================
+
 import express from "express";
 import axios from "axios";
-import dotenv from "dotenv";
-dotenv.config();
 
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// ==================== CONFIG ====================
+// ==========================
+// 🌍 المتغيرات من .env
+// ==========================
 const PORT = process.env.PORT || 3000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
 
-// ==================== STATE ====================
-const activeUsers = new Map(); // { phone: { greeted, messages, timer, lastResponded } }
+// ==========================
+// 📦 متغيرات النظام الداخلية
+// ==========================
+const lastMessages = new Map(); // لتجميع الرسائل من نفس المرسل
+const lastResponseTime = new Map(); // لتجنب الرد مرتين
+const REPLY_DELAY_MS = 10000; // انتظار 10 ثواني بعد آخر رسالة
 
-// ==================== UTIL FUNCTIONS ====================
+// ==========================
+// 🧰 دوال مساعدة
+// ==========================
 
+// 📩 إرسال رسالة عبر Ultramsg
 async function sendMessage(to, message) {
   try {
-    const response = await axios.post(
-      `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`,
-      {
-        to: `${to}`,
-        body: message,
-      },
-      {
-        headers: { "Content-Type": "application/json" },
-        params: { token: ULTRAMSG_TOKEN },
-      }
-    );
-    console.log("✅ Sent via Ultramsg:", response.data);
+    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
+    const res = await axios.post(url, {
+      token: ULTRAMSG_TOKEN,
+      to,
+      body: message,
+    });
+    console.log(`✅ Sent to ${to}: ${message}`);
   } catch (err) {
-    console.error("❌ Error sending WhatsApp message:", err.response?.data || err.message);
+    console.error("❌ Send Error:", err.response?.data || err.message);
   }
 }
 
-// ✳️ معالجة الرسائل بعد الانتظار
-async function processUserMessages(from, messages) {
-  const fullText = messages.join(" ").trim();
-
-  // 🔍 التحقق إن كان المستخدم يسأل عن الطلبات
-  const orderMatch = fullText.match(/\b\d{3,6}\b/);
-  if (orderMatch) {
-    const orderId = orderMatch[0];
-    const order = await getShopifyOrder(orderId);
-    if (order) {
-      await sendMessage(from, `📦 حالة الطلب رقم ${orderId}: ${order.status}\n${order.tracking}`);
-      return;
-    } else {
-      await sendMessage(from, `🚫 ما حصلت طلب بهذا الرقم ${orderId}. تأكد منه لو سمحت.`);
-      return;
-    }
-  }
-
-  // 🤖 إذا لم يكن طلب، نستخدم ChatGPT
-  const aiResponse = await getAIResponse(fullText);
-  if (aiResponse) {
-    await sendMessage(from, aiResponse);
-  } else {
-    await sendMessage(from, "⚠️ صار خلل مؤقت في النظام. حاول مرة ثانية.");
-  }
-}
-
-// 💬 استدعاء ChatGPT API
-async function getAIResponse(prompt) {
+// ==========================
+// 🛍️ جلب تفاصيل منتج من Shopify
+// ==========================
+async function searchProductInShopify(query) {
   try {
-    const res = await axios.post(
+    const url = `${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?title=${encodeURIComponent(query)}`;
+    const res = await axios.get(url, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN },
+    });
+
+    if (res.data.products && res.data.products.length > 0) {
+      const p = res.data.products[0];
+      const variant = p.variants?.[0];
+      const available = variant?.inventory_quantity > 0 ? "متوفر ✅" : "غير متوفر ❌";
+      return `📦 المنتج: ${p.title}\n💰 السعر: ${variant?.price || "غير محدد"} ر.ع\n📦 الحالة: ${available}`;
+    } else return "لم أجد هذا المنتج في المتجر.";
+  } catch {
+    return "⚠️ تعذر جلب بيانات المنتج حالياً.";
+  }
+}
+
+// ==========================
+// 🔍 جلب حالة الطلب من Shopify
+// ==========================
+async function fetchOrderByNumber(orderNumber) {
+  try {
+    const url = `${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${orderNumber}`;
+    const res = await axios.get(url, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN },
+    });
+
+    if (res.data.orders?.length > 0) {
+      const o = res.data.orders[0];
+      const status = o.fulfillment_status || "قيد المعالجة";
+      const total = o.total_price;
+      const currency = o.currency;
+      return `🔎 حالة طلبك ${o.name}: ${status}\n💰 المجموع: ${total} ${currency}`;
+    } else return "⚠️ لم أجد أي طلب بهذا الرقم.";
+  } catch {
+    return "⚠️ تعذر التحقق من الطلب حالياً.";
+  }
+}
+
+// ==========================
+// 📄 جلب سياسة أو صفحة من Shopify
+// ==========================
+async function fetchStorePolicy(keyword) {
+  const map = {
+    "الشحن": "shipping",
+    "الإرجاع": "return",
+    "الخصوصية": "privacy",
+    "الشروط": "terms",
+  };
+
+  const handle = map[keyword];
+  if (!handle) return null;
+
+  try {
+    const url = `${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/pages.json`;
+    const res = await axios.get(url, {
+      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN },
+    });
+
+    const page = res.data.pages.find((p) => p.handle.includes(handle));
+    return page ? `📘 سياسة ${keyword}:\n${page.body_html.replace(/<[^>]*>?/gm, "").slice(0, 400)}...` : null;
+  } catch {
+    return null;
+  }
+}
+
+// ==========================
+// 🤖 الرد الذكي عبر ChatGPT
+// ==========================
+async function generateAIReply(userMessage) {
+  try {
+    // تحقق من رقم الطلب
+    const orderMatch = userMessage.match(/#?\d{3,6}/);
+    if (orderMatch) return await fetchOrderByNumber(orderMatch[0].replace("#", ""));
+
+    // تحقق من طلب منتج
+    if (userMessage.includes("منتج") || userMessage.includes("سعر") || userMessage.includes("متوفر")) {
+      const query = userMessage.replace(/(منتج|سعر|كم|عن)/g, "").trim();
+      if (query.length > 2) return await searchProductInShopify(query);
+    }
+
+    // تحقق من السياسات
+    const policies = ["الشحن", "الإرجاع", "الخصوصية", "الشروط"];
+    for (const k of policies) {
+      if (userMessage.includes(k)) {
+        const policy = await fetchStorePolicy(k);
+        if (policy) return policy;
+      }
+    }
+
+    // الرد من ChatGPT
+    const response = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
-            content: `
-              أنت مساعد ذكي يمثل متجر eSelect | إي سيلكت.
-              تحدث باللهجة العمانية فقط.
-              كن ودوداً، مختصراً، ومقنعاً.
-              أجب فقط بما له علاقة بالمنتجات، الطلبات، الشحن، الدفع، أو السياسات.
-              إذا طلب الزبون الاتصال، أخبره أنه يمكنه الضغط على زر الاتصال ليتحدث مع الدعم الفني.
-            `,
+            content: `أنت مساعد ذكي لمتجر eSelect | إي سيلكت في عمان.
+            تتحدث بلغة ودودة، تشرح بوضوح، وتساعد في الإجابة على استفسارات الزبائن.
+            لا تذكر أي متاجر أو مواقع أخرى.`,
           },
-          { role: "user", content: prompt },
+          { role: "user", content: userMessage },
         ],
+        max_tokens: 300,
       },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-      }
+      { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
     );
-    return res.data.choices[0].message.content.trim();
+
+    return response.data.choices[0].message.content.trim();
   } catch (err) {
-    console.error("❌ OpenAI Error:", err.response?.data || err.message);
-    return null;
+    console.error("ChatGPT Error:", err.message);
+    return "⚠️ حدث خلل مؤقت في النظام. حاول لاحقًا.";
   }
 }
 
-// 🛍️ جلب الطلب من Shopify
-async function getShopifyOrder(orderId) {
-  try {
-    const res = await axios.get(`${SHOPIFY_STORE_URL}/admin/api/2024-04/orders.json?name=${orderId}`, {
-      headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN },
-    });
-    const order = res.data.orders?.[0];
-    if (!order) return null;
-    return {
-      id: order.id,
-      status: order.financial_status || "غير محدد",
-      tracking:
-        order.fulfillments?.[0]?.tracking_url || "لا يوجد رابط تتبع حالياً.",
-    };
-  } catch (err) {
-    console.error("❌ Shopify Error:", err.response?.data || err.message);
-    return null;
-  }
-}
-
-// ==================== CORE BOT LOGIC ====================
-
+// ==========================
+// 🔔 استقبال الرسائل من Ultramsg Webhook
+// ==========================
 app.post("/webhook", async (req, res) => {
-  try {
-    const body = req.body;
-    const from = body.from?.replace("@c.us", "");
-    const text = body.body?.trim();
+  res.sendStatus(200);
+  const msg = req.body;
 
-    if (!from || !text) return res.sendStatus(200);
+  if (!msg || !msg.data?.body || !msg.data?.from) return;
 
-    if (!activeUsers.has(from)) {
-      activeUsers.set(from, { greeted: false, messages: [], timer: null, lastResponded: false });
+  const from = msg.data.from;
+  const text = msg.data.body.trim();
+
+  // تجاهل رسائل البوت نفسه
+  if (text.includes("eSelect") || text.includes("⚠️")) return;
+
+  // حفظ الرسائل في انتظار الرد
+  if (!lastMessages.has(from)) lastMessages.set(from, []);
+  lastMessages.get(from).push(text);
+
+  console.log(`📩 رسالة جديدة من ${from}: ${text}`);
+
+  // تحديث آخر وقت استلام
+  lastResponseTime.set(from, Date.now());
+
+  // انتظار 10 ثواني بعد آخر رسالة من المرسل
+  setTimeout(async () => {
+    const lastTime = lastResponseTime.get(from);
+    if (Date.now() - lastTime >= REPLY_DELAY_MS) {
+      const allMsgs = lastMessages.get(from).join(" ");
+      lastMessages.delete(from);
+
+      console.log(`🧠 معالجة ${from}: ${allMsgs}`);
+      const reply = await generateAIReply(allMsgs);
+      await sendMessage(from, reply);
     }
-
-    const session = activeUsers.get(from);
-    session.messages.push(text);
-
-    // 👋 الترحيب فقط أول مرة
-    if (!session.greeted) {
-      session.greeted = true;
-      await sendMessage(from, "👋 هلا وسهلا بك في eSelect | إي سيلكت! كيف أقدر أخدمك اليوم؟");
-    }
-
-    // إذا كان تم الرد مسبقاً — إعادة تفعيل الرد فقط عند وجود رسالة جديدة
-    if (session.lastResponded) session.lastResponded = false;
-
-    // إلغاء المؤقت القديم
-    if (session.timer) clearTimeout(session.timer);
-
-    // بدء مؤقت جديد
-    session.timer = setTimeout(async () => {
-      if (!session.lastResponded && session.messages.length > 0) {
-        const msgs = [...session.messages];
-        session.messages = [];
-        await processUserMessages(from, msgs);
-        session.lastResponded = true;
-      }
-    }, 10000); // ← الانتظار 10 ثواني بعد آخر رسالة
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Webhook Error:", err);
-    res.sendStatus(500);
-  }
+  }, REPLY_DELAY_MS);
 });
 
-// ==================== START SERVER ====================
-app.listen(PORT, () => console.log(`🚀 eSelect WhatsApp AI Bot running on port ${PORT}`));
+// ==========================
+// 🚀 تشغيل السيرفر
+// ==========================
+app.listen(PORT, () => {
+  console.log(`🚀 eSelect WhatsApp Bot is running on port ${PORT}`);
+});
