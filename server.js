@@ -1,185 +1,174 @@
-const express = require("express");
-const axios = require("axios");
-const bodyParser = require("body-parser");
-const { google } = require("googleapis");
-const { OpenAI } = require("openai");
-const nodemailer = require("nodemailer");
+import express from "express";
+import axios from "axios";
+import bodyParser from "body-parser";
+import fs from "fs";
+import { google } from "googleapis";
+import dotenv from "dotenv";
+dotenv.config();
 
 const app = express();
 app.use(bodyParser.json());
-
-// ===================== ENV =====================
 const PORT = process.env.PORT || 3000;
-const ULTRA_INSTANCE = process.env.ULTRAMSG_INSTANCE;
-const ULTRA_TOKEN = process.env.ULTRAMSG_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
-const SHOPIFY_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
-// ===================== SETUP =====================
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-const sessions = {};
-const pendingReplies = {};
-
-// Google Drive Auth
-const driveAuth = new google.auth.GoogleAuth({
-  keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+// ============ GOOGLE DRIVE CONFIG ============
+const auth = new google.auth.GoogleAuth({
+  credentials: JSON.parse(fs.readFileSync("eselect-bot-storage-3268fdefd526.json", "utf8")),
   scopes: ["https://www.googleapis.com/auth/drive.file"],
 });
-const drive = google.drive({ version: "v3", auth: driveAuth });
+const drive = google.drive({ version: "v3", auth });
 
-// ===================== FUNCTIONS =====================
+// ============ MEMORY & CACHE ============
+const memoryFileId = "1VrfDaD-T-3UptZXVILYvrDVnmzmq7g0E";
+let messageCache = {};
+let userMemory = {}; // محفوظ في الذاكرة و Drive
 
-// إرسال رسالة واتساب
-async function sendMessage(to, body) {
+// تحميل البيانات من Google Drive عند بدء السيرفر
+async function loadMemory() {
   try {
-    const res = await axios.post(`https://api.ultramsg.com/${ULTRA_INSTANCE}/messages/chat`, {
-      token: ULTRA_TOKEN,
+    const res = await drive.files.list({ q: `'${memoryFileId}' in parents` });
+    console.log("📁 ذاكرة Google Drive متصلة:", res.data.files.length);
+  } catch (err) {
+    console.error("⚠️ فشل تحميل الذاكرة:", err.message);
+  }
+}
+loadMemory();
+
+// ============ HELPER FUNCTIONS ============
+function delay(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+async function sendMessage(to, message) {
+  try {
+    await axios.post(`https://api.ultramsg.com/${process.env.ULTRAMSG_INSTANCE}/messages/chat`, {
+      token: process.env.ULTRAMSG_TOKEN,
       to,
-      body,
+      body: message,
     });
-    console.log("✅ أُرسلت إلى", to, ":", body.slice(0, 80));
+    console.log(`✅ أُرسلت إلى ${to}: ${message.slice(0, 60)}...`);
   } catch (err) {
-    console.error("❌ خطأ في الإرسال:", err.response?.data || err.message);
+    console.error("❌ فشل الإرسال:", err.response?.data || err.message);
   }
 }
 
-// جلب طلب من Shopify
-async function fetchOrder(orderId) {
+async function getChatGPTResponse(prompt) {
   try {
-    const res = await axios.get(
-      `https://${SHOPIFY_DOMAIN}/admin/api/2025-01/orders/${orderId}.json`,
-      { headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN } }
+    const res = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `أنت ماسعود، مساعد متجر eSelect الذكي. 
+            تجاوب باللهجة العمانية بأسلوب ودود. 
+            تجيب عن المنتجات، الطلبات، الأسعار، الضمان، الدفع، والشحن.
+            إذا المنتج أو الطلب غير متوفر، قل "ما متوفر حاليا".
+            لا ترد بكلمة "كيف يمكنني مساعدتك اليوم؟" أكثر من مرة بالمحادثة الواحدة.`,
+          },
+          { role: "user", content: prompt },
+        ],
+      },
+      { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
     );
-    return res.data.order;
+    return res.data.choices[0].message.content;
   } catch (err) {
-    return null;
-  }
-}
-
-// جلب منتجات من Shopify
-async function fetchProducts() {
-  try {
-    const res = await axios.get(
-      `https://${SHOPIFY_DOMAIN}/admin/api/2025-01/products.json`,
-      { headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN } }
-    );
-    return res.data.products || [];
-  } catch (err) {
-    console.error("❌ خطأ في جلب المنتجات:", err.message);
-    return [];
-  }
-}
-
-// حفظ ذاكرة في Google Drive
-async function saveToDrive(user, data) {
-  try {
-    const fileMetadata = {
-      name: `${user}-${Date.now()}.txt`,
-      parents: [GOOGLE_DRIVE_FOLDER_ID],
-    };
-    const media = {
-      mimeType: "text/plain",
-      body: data,
-    };
-    await drive.files.create({
-      resource: fileMetadata,
-      media,
-      fields: "id",
-    });
-    console.log("🗂️ تم حفظ محادثة المستخدم:", user);
-  } catch (err) {
-    console.error("⚠️ فشل الحفظ في Drive:", err.message);
-  }
-}
-
-// معالجة الذكاء الاصطناعي
-async function aiReply(prompt) {
-  try {
-    const res = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "أنت مساعد افتراضي ذكي باسم (مسعود) خاص بمتجر eSelect العماني. تتحدث باللهجة العمانية باحترام وود. تجاوب العملاء حول المنتجات، الطلبات، الأسعار، مدة الشحن، السياسات، والاستبدال. لا تذكر معلومات غير مؤكدة. إذا لم تجد معلومة قل بلطف: 'ما متأكد من هذا الشي، بس ممكن أتحقق لك'.",
-        },
-        { role: "user", content: prompt },
-      ],
-    });
-    return res.choices[0].message.content;
-  } catch (err) {
-    console.error("❌ خطأ من OpenAI:", err.message);
+    console.error("⚠️ خطأ من OpenAI:", err.response?.data || err.message);
     return "⚠️ صار خلل مؤقت في النظام. حاول مرة ثانية.";
   }
 }
 
-// ===================== MESSAGE HANDLER =====================
-async function processMessages(phone, fullText) {
-  console.log("🧠 معالجة", phone + ":", fullText);
-
-  // حفظ في Google Drive (ذاكرة)
-  await saveToDrive(phone, fullText);
-
-  // حالة الطلب
-  if (/(\d{3,6})/.test(fullText) && /(طلب|طلبي|طلبية|order|طلباتي)/i.test(fullText)) {
-    const orderId = fullText.match(/\d{3,6}/)[0];
-    const order = await fetchOrder(orderId);
-    if (order) {
-      await sendMessage(
-        phone,
-        `🔎 حالة طلبك #${orderId}: ${order.fulfillment_status || "قيد المعالجة"}\n💰 المجموع: ${order.total_price} ${order.currency}`
-      );
-      return;
-    } else {
-      await sendMessage(phone, "❌ ما حصلت رقم الطلب هذا في النظام، تأكد منه لو سمحت.");
-      return;
-    }
+async function getOrderStatus(orderId) {
+  try {
+    const res = await axios.get(
+      `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-07/orders/${orderId}.json`,
+      { headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN } }
+    );
+    const o = res.data.order;
+    return `🔎 حالة طلبك #${o.id}: ${o.fulfillment_status || "قيد المعالجة"}\n💰 المجموع: ${o.total_price} ${o.currency}`;
+  } catch {
+    return "❌ لم أجد طلب بهذا الرقم.";
   }
-
-  // المنتجات
-  if (/منتج|منتجات|عروض|جديد|خصم|ساعات|ألعاب|الكترونيات|لبان/i.test(fullText)) {
-    const products = await fetchProducts();
-    if (products.length === 0) {
-      await sendMessage(phone, "📦 حالياً ما في منتجات معروضة لأن المتجر في صيانة مؤقتة.");
-      return;
-    }
-    const randoms = products.slice(0, 3).map((p) => `🛍️ ${p.title} - ${p.variants[0].price} OMR`);
-    await sendMessage(phone, `بعض المنتجات المتوفرة:\n${randoms.join("\n")}`);
-    return;
-  }
-
-  // استفسارات عامة
-  const reply = await aiReply(fullText);
-  await sendMessage(phone, reply);
 }
 
-// ===================== WHATSAPP WEBHOOK =====================
-app.post("/webhook", async (req, res) => {
+async function searchProducts(query) {
   try {
-    const data = req.body;
-    const from = data?.data?.from;
-    const text = data?.data?.body?.trim();
-
-    if (!from || !text) return res.sendStatus(200);
-
-    if (!sessions[from]) sessions[from] = { messages: [] };
-    sessions[from].messages.push(text);
-
-    clearTimeout(pendingReplies[from]);
-    pendingReplies[from] = setTimeout(async () => {
-      const fullText = sessions[from].messages.join(" ");
-      sessions[from].messages = [];
-      await processMessages(from, fullText);
-    }, 10000); // انتظار 10 ثواني بعد آخر رسالة
-  } catch (err) {
-    console.error("❌ Webhook Error:", err.message);
+    const res = await axios.get(
+      `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2024-07/products.json?title=${encodeURIComponent(query)}`,
+      { headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN } }
+    );
+    const items = res.data.products;
+    if (!items.length) return "لم أجد هذا المنتج في المتجر.";
+    const first = items[0];
+    return `📦 المنتج: ${first.title}\n💰 السعر: ${first.variants[0].price} ${first.variants[0].currency || "OMR"}\n🔗 ${first.online_store_url || "https://eselect.store"}`;
+  } catch {
+    return "⚠️ ما قدرت أوصل لبيانات المنتجات حالياً.";
   }
+}
+
+// ============ CORE BOT LOGIC ============
+const lastMessageTime = {};
+
+app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
+  const data = req.body;
+  const from = data.from;
+  const message = data.body?.trim();
+
+  if (!from || !message) return;
+  console.log(`📩 رسالة جديدة من ${from}: ${message}`);
+
+  const now = Date.now();
+  lastMessageTime[from] = now;
+
+  if (!messageCache[from]) messageCache[from] = [];
+  messageCache[from].push(message);
+
+  await delay(10000);
+
+  if (Date.now() - lastMessageTime[from] < 10000) return; // لا ترد إذا أرسل بعدها
+
+  const fullMessage = messageCache[from].join(" ");
+  messageCache[from] = [];
+
+  console.log(`🧠 معالجة ${from}: ${fullMessage}`);
+
+  // تحليل نوع الرسالة
+  let reply;
+  if (/(\d{3,6})/.test(fullMessage)) {
+    const orderId = fullMessage.match(/(\d{3,6})/)[0];
+    reply = await getOrderStatus(orderId);
+  } else if (/منتج|منتجات|سعر|كم|يتوفر/.test(fullMessage)) {
+    reply = await searchProducts(fullMessage);
+  } else {
+    reply = await getChatGPTResponse(fullMessage);
+  }
+
+  await sendMessage(from, reply);
+
+  // حفظ في Google Drive
+  try {
+    await drive.files.create({
+      requestBody: {
+        name: `chat-${from}-${Date.now()}.txt`,
+        parents: [memoryFileId],
+      },
+      media: {
+        mimeType: "text/plain",
+        body: `From: ${from}\n\n${fullMessage}\n\nReply:\n${reply}`,
+      },
+    });
+  } catch (err) {
+    console.error("⚠️ فشل الحفظ في Drive:", err.message);
+  }
 });
 
-// ===================== START =====================
+// ============ DEFAULT ROUTE ============
+app.get("/", (req, res) => {
+  res.send("🚀 eSelect | Masoud AI Bot يعمل بنجاح!");
+});
+
+// ============ START SERVER ============
 app.listen(PORT, () => {
   console.log(`🚀 eSelect | Masoud AI Bot يعمل على المنفذ ${PORT}`);
 });
