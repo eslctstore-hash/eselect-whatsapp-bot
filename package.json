@@ -1,14 +1,14 @@
 {
-  "name": "eselect-whatsapp-ai-bot",
-  "version": "1.0.0",
+  "name": "eselect-whatsapp-bot",
+  "version": "2.1.0",
+  "description": "WhatsApp chatbot for eSelect store using Ultramsg, Shopify, and ChatGPT",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.7.2",
-    "dotenv": "^16.4.5",
+    "axios": "^1.7.0",
     "express": "^4.19.2"
   }
 }
