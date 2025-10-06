@@ -17,109 +17,141 @@ const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const PORT = process.env.PORT || 10000;
 
 // ================== INIT OPENAI ==================
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// ================== SEND MESSAGE TO WHATSAPP ==================
+// ================== STATE MANAGEMENT ==================
+const userSessions = new Map(); // { phone: { messages: [], timer: timeout } }
+
+// ================== SEND MESSAGE ==================
 async function sendMessage(to, message) {
   try {
-    const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE}/messages/chat`;
-    const data = {
+    const res = await axios.post(`https://api.ultramsg.com/${ULTRAMSG_INSTANCE}/messages/chat`, {
       token: ULTRAMSG_TOKEN,
       to,
       body: message,
-    };
-    const res = await axios.post(url, data);
+    });
     console.log("✅ Sent via Ultramsg:", res.data);
   } catch (err) {
     console.error("❌ Send error:", err.response?.data || err.message);
   }
 }
 
-// ================== FETCH ORDER FROM SHOPIFY ==================
+// ================== FETCH ORDER ==================
 async function fetchOrderByNumber(orderNumber) {
   try {
     const url = `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2024-07/orders.json?name=${orderNumber}`;
-    const response = await axios.get(url, {
+    const res = await axios.get(url, {
       headers: {
         "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json",
       },
     });
 
-    const orders = response.data.orders;
+    const orders = res.data.orders;
     if (orders && orders.length > 0) {
       const order = orders[0];
-      const status = order.fulfillment_status || "لم يتم شحن الطلب بعد";
+      const status = order.fulfillment_status || "قيد المعالجة";
       const total = order.total_price + " " + order.currency;
       const date = order.created_at.split("T")[0];
-      return `📦 رقم الطلب ${orderNumber}\nالحالة: ${status}\nالمجموع: ${total}\nتاريخ الطلب: ${date}`;
+      return `📦 رقم الطلب ${orderNumber}\nالحالة: ${status}\nالإجمالي: ${total}\nتاريخ الطلب: ${date}`;
     } else {
-      return "⚠️ لم أجد أي طلب بهذا الرقم في النظام.";
+      return "⚠️ ما لقيت أي طلب بهالرقم، تأكد منه زين.";
     }
-  } catch (error) {
-    console.error("Shopify Error:", error.message);
-    return "⚠️ حدث خطأ أثناء التحقق من الطلب.";
+  } catch (err) {
+    console.error("❌ Shopify error:", err.message);
+    return "⚠️ صار خلل أثناء التحقق من الطلب.";
   }
 }
 
-// ================== WEBHOOK ROUTE ==================
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
+// ================== PROCESS USER MESSAGES ==================
+async function processUserMessages(phone, messages) {
+  const text = messages.join(" ").trim();
+  console.log(`🧠 معالجة ${messages.length} رسالة من ${phone}:`, text);
+
+  // التحقق من رقم الطلب
+  if (/^\d{3,6}$/.test(text)) {
+    const reply = await fetchOrderByNumber(text);
+    await sendMessage(phone, reply);
+    return;
+  }
+
+  // استفسارات الطلب
+  if (/(طلبي|طلبية|اوردر|طلب|order)/i.test(text)) {
+    await sendMessage(phone, "ℹ️ أرسل لي رقم الطلب علشان أتحقق لك من حالته يا الغالي.");
+    return;
+  }
+
+  // توليد رد من الذكاء الاصطناعي
+  const prompt = `
+  الزبون قال: "${text}"
+  رد عليه باللهجة العمانية، تكون ودودة واحترافية.
+  لا تذكر مواقع أو مصادر خارجية.
+  إذا سأل عن منتجات غير موجودة في متجر eSelect قل إنها غير متوفرة حالياً.
+  إذا تكلم عن الشحن أو الدفع أو الإرجاع، استخدم سياسات eSelect.
+  اختصر الرد بحيث يكون طبيعي وواقعي.
+  `;
+
   try {
-    const messageData = req.body;
-    const from = messageData.data?.from;
-    const text = messageData.data?.body?.trim();
-
-    if (!from || !text) return;
-
-    console.log("📩 رسالة جديدة من", from, ":", text);
-
-    // التحقق من الأرقام (الطلبات)
-    if (/^\d+$/.test(text)) {
-      const orderInfo = await fetchOrderByNumber(text);
-      await sendMessage(from, orderInfo);
-      return;
-    }
-
-    // التحقق من استفسارات الطلب
-    if (/(طلبي|طلبية|اوردر|طلب|order)/i.test(text)) {
-      await sendMessage(from, "ℹ️ يرجى تزويدي برقم الطلب للتحقق من حالته.");
-      return;
-    }
-
-    // استفسارات عامة (استخدام الذكاء الاصطناعي)
-    const prompt = `
-      المستخدم كتب: "${text}".
-      رد باحترافية ولغة ودية باللهجة العمانية الفصحى القصيرة.
-      إذا السؤال عن منتجات eSelect أو المتجر، استخدم معلومات واقعية فقط.
-      إذا لم تتوفر معلومات المنتج، قل "حالياً غير متوفر لدينا".
-      لا تذكر مواقع خارجية أو أسعار تقديرية.
-      استخدم أسلوب محترم وودود.
-    `;
-
-    const aiResponse = await openai.chat.completions.create({
+    const aiRes = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "أنت مساعد ذكي لمتجر eSelect الإلكتروني في سلطنة عمان." },
+        { role: "system", content: "أنت مساعد ذكي لمتجر eSelect في سلطنة عمان، تتحدث بلهجة عمانية لطيفة ومهذبة." },
         { role: "user", content: prompt },
       ],
       temperature: 0.7,
     });
 
-    const reply = aiResponse.choices[0].message.content || "⚠️ صار خلل مؤقت في النظام. حاول مرة ثانية.";
-    await sendMessage(from, reply);
-
+    const reply = aiRes.choices[0].message.content || "عذرًا، ما قدرت أفهمك، ممكن توضح أكثر؟";
+    await sendMessage(phone, reply);
   } catch (err) {
-    console.error("❌ Error:", err);
+    console.error("❌ AI error:", err.message);
+    await sendMessage(phone, "⚠️ صار خلل مؤقت في النظام. حاول بعد شوي.");
+  }
+}
+
+// ================== HANDLE INCOMING MESSAGE ==================
+async function handleIncomingMessage(from, text) {
+  if (!from || !text) return;
+  text = text.trim();
+
+  // إنشاء جلسة المستخدم إذا غير موجودة
+  if (!userSessions.has(from)) {
+    userSessions.set(from, { messages: [], timer: null });
+    await sendMessage(from, "👋 هلا وسهلا بك في eSelect | إي سيلكت! كيف أقدر أخدمك اليوم؟");
+  }
+
+  const session = userSessions.get(from);
+  session.messages.push(text);
+
+  // إذا فيه مؤقت سابق، ألغِه
+  if (session.timer) clearTimeout(session.timer);
+
+  // بدء مؤقت جديد (10 ثواني)
+  session.timer = setTimeout(async () => {
+    const msgs = [...session.messages];
+    session.messages = []; // تصفير الرسائل
+    await processUserMessages(from, msgs);
+  }, 10000);
+}
+
+// ================== WEBHOOK ==================
+app.post("/webhook", async (req, res) => {
+  res.sendStatus(200);
+  try {
+    const msg = req.body?.data;
+    const from = msg?.from?.replace("@c.us", "");
+    const text = msg?.body;
+    console.log("📩 رسالة جديدة من", from, ":", text);
+    await handleIncomingMessage(from, text);
+  } catch (err) {
+    console.error("❌ Webhook error:", err.message);
   }
 });
 
 // ================== TEST ROUTE ==================
 app.get("/", (req, res) => {
-  res.send("🚀 WhatsApp bot running with ChatGPT + Ultramsg + Shopify");
+  res.send("🚀 eSelect WhatsApp Bot (Smart Oman AI Version)");
 });
 
-// ================== START SERVER ==================
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// ================== START ==================
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
