@@ -1,232 +1,185 @@
-import express from "express";
-import axios from "axios";
-import fs from "fs";
-import cron from "node-cron";
-import nodemailer from "nodemailer";
-import dotenv from "dotenv";
-dotenv.config();
+const express = require("express");
+const axios = require("axios");
+const bodyParser = require("body-parser");
+const { google } = require("googleapis");
+const { OpenAI } = require("openai");
+const nodemailer = require("nodemailer");
 
 const app = express();
-app.use(express.json());
+app.use(bodyParser.json());
 
-// ================== المتغيرات من .env ==================
-const {
-  ULTRAMSG_INSTANCE,
-  ULTRAMSG_TOKEN,
-  OPENAI_API_KEY,
-  SHOPIFY_STORE_DOMAIN,
-  SHOPIFY_ACCESS_TOKEN,
-  SUPPORT_EMAIL,
-  PORT
-} = process.env;
+// ===================== ENV =====================
+const PORT = process.env.PORT || 3000;
+const ULTRA_INSTANCE = process.env.ULTRAMSG_INSTANCE;
+const ULTRA_TOKEN = process.env.ULTRAMSG_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
+const SHOPIFY_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
-const ULTRAMSG_URL = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE}`;
-const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+// ===================== SETUP =====================
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+const sessions = {};
+const pendingReplies = {};
 
-// ================== قواعد بيانات مؤقتة ==================
-let customersMemory = {}; // ذاكرة المستخدمين
-let productsCache = []; // ذاكرة المنتجات المؤقتة
+// Google Drive Auth
+const driveAuth = new google.auth.GoogleAuth({
+  keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+  scopes: ["https://www.googleapis.com/auth/drive.file"],
+});
+const drive = google.drive({ version: "v3", auth: driveAuth });
 
-// تحميل الذاكرة من الملف إذا موجود
-if (fs.existsSync("memory.json")) {
-  customersMemory = JSON.parse(fs.readFileSync("memory.json"));
-}
+// ===================== FUNCTIONS =====================
 
-// حفظ الذاكرة دورياً
-const saveMemory = () => {
-  fs.writeFileSync("memory.json", JSON.stringify(customersMemory, null, 2));
-};
-
-// ================== جلب بيانات المتجر ==================
-async function fetchShopifyProducts() {
+// إرسال رسالة واتساب
+async function sendMessage(to, body) {
   try {
-    const res = await axios.get(`https://${SHOPIFY_STORE_DOMAIN}/admin/api/2024-10/products.json`, {
-      headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        "Content-Type": "application/json"
-      }
-    });
-    productsCache = res.data.products.map(p => ({
-      title: p.title,
-      price: p.variants[0].price,
-      available: p.status === "active",
-      url: `https://${SHOPIFY_STORE_DOMAIN}/products/${p.handle}`
-    }));
-    console.log(`✅ تم تحديث بيانات المنتجات (${productsCache.length})`);
-  } catch (err) {
-    console.error("❌ خطأ في جلب بيانات Shopify:", err.message);
-  }
-}
-
-// أول تحديث للمنتجات
-fetchShopifyProducts();
-
-// تحديث كل 30 دقيقة
-cron.schedule("*/30 * * * *", fetchShopifyProducts);
-
-// ================== إرسال واتساب ==================
-async function sendWhatsAppMessage(to, body) {
-  try {
-    const res = await axios.post(`${ULTRAMSG_URL}/messages/chat`, {
-      token: ULTRAMSG_TOKEN,
+    const res = await axios.post(`https://api.ultramsg.com/${ULTRA_INSTANCE}/messages/chat`, {
+      token: ULTRA_TOKEN,
       to,
-      body
+      body,
     });
-    console.log(`✅ أُرسلت إلى ${to}: ${body.substring(0, 50)}...`);
+    console.log("✅ أُرسلت إلى", to, ":", body.slice(0, 80));
   } catch (err) {
-    console.error("❌ فشل إرسال رسالة:", err.message);
+    console.error("❌ خطأ في الإرسال:", err.response?.data || err.message);
   }
 }
 
-// ================== ذكاء سياقي ==================
-const userSessions = new Map();
-
-function getFollowUpMessage(sender) {
-  const now = Date.now();
-  const lastInteraction = userSessions.get(sender);
-  userSessions.set(sender, now);
-
-  if (!lastInteraction) {
-    return "👋 مرحبًا بك في eSelect | إي سيلكت! كيف أقدر أخدمك اليوم؟";
-  }
-
-  const diffMinutes = (now - lastInteraction) / (1000 * 60);
-  if (diffMinutes < 10) {
-    const followUps = [
-      "أكيد! تحب أساعدك بشي ثاني؟ 😊",
-      "تبغاني أتحقق من شي ثاني بعد؟ 🔍",
-      "تمام، تبي أقدملك مساعدة بشي ثاني؟ 💬",
-      "رائع 🙌 تحب أزودك بمعلومات أكثر؟"
-    ];
-    return followUps[Math.floor(Math.random() * followUps.length)];
-  } else if (diffMinutes > 30) {
-    return "هلا وسهلا فيك من جديد 🌟 كيف أقدر أخدمك اليوم؟";
-  } else {
-    return "هل تحتاج أي مساعدة إضافية؟ 😊";
-  }
-}
-
-// ================== دمج الذاكرة ==================
-function appendUserMemory(sender, text) {
-  if (!customersMemory[sender]) {
-    customersMemory[sender] = { history: [] };
-  }
-  customersMemory[sender].history.push({ msg: text, time: new Date() });
-  saveMemory();
-}
-
-// ================== الرد بالذكاء الاصطناعي ==================
-async function generateReply(sender, text) {
+// جلب طلب من Shopify
+async function fetchOrder(orderId) {
   try {
-    let memoryContext = "";
-    if (customersMemory[sender]?.history) {
-      memoryContext = customersMemory[sender].history
-        .slice(-10)
-        .map(h => h.msg)
-        .join("\n");
-    }
-
-    const productsList = productsCache
-      .slice(0, 10)
-      .map(p => `${p.title} - ${p.price} OMR`)
-      .join("\n");
-
-    const messages = [
-      {
-        role: "system",
-        content: `أنت ماسعود، مساعد ذكي يتحدث باللهجة العمانية لمتجر eSelect الإلكتروني.
-        رد على العملاء بشكل ودود واحترافي.
-        استخدم لهجة عمانية خفيفة، وكن لبقًا جدًا.
-        تعرف كل منتجات المتجر، الأسعار، طرق الدفع، وسياسة الشحن.
-        إذا المتجر مغلق، قل للعميل أن المتجر تحت الصيانة مؤقتًا ويمكنه العودة لاحقًا.
-        قائمة المنتجات المتوفرة: ${productsList}.`
-      },
-      {
-        role: "user",
-        content: memoryContext + "\n" + text
-      }
-    ];
-
-    const res = await axios.post(
-      OPENAI_URL,
-      {
-        model: "gpt-4-turbo",
-        messages,
-        temperature: 0.8
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`
-        }
-      }
+    const res = await axios.get(
+      `https://${SHOPIFY_DOMAIN}/admin/api/2025-01/orders/${orderId}.json`,
+      { headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN } }
     );
-
-    return res.data.choices[0].message.content.trim();
+    return res.data.order;
   } catch (err) {
-    console.error("❌ خطأ في OpenAI:", err.response?.data || err.message);
-    return "⚠️ صار خلل بسيط بالنظام، جرب ترسل لي بعد شوي إن شاء الله.";
+    return null;
   }
 }
 
-// ================== المعالجة الرئيسية ==================
-let messageQueue = {};
-const MESSAGE_DELAY = 10000;
+// جلب منتجات من Shopify
+async function fetchProducts() {
+  try {
+    const res = await axios.get(
+      `https://${SHOPIFY_DOMAIN}/admin/api/2025-01/products.json`,
+      { headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN } }
+    );
+    return res.data.products || [];
+  } catch (err) {
+    console.error("❌ خطأ في جلب المنتجات:", err.message);
+    return [];
+  }
+}
 
-app.post("/webhook", async (req, res) => {
-  const data = req.body;
-  res.sendStatus(200);
+// حفظ ذاكرة في Google Drive
+async function saveToDrive(user, data) {
+  try {
+    const fileMetadata = {
+      name: `${user}-${Date.now()}.txt`,
+      parents: [GOOGLE_DRIVE_FOLDER_ID],
+    };
+    const media = {
+      mimeType: "text/plain",
+      body: data,
+    };
+    await drive.files.create({
+      resource: fileMetadata,
+      media,
+      fields: "id",
+    });
+    console.log("🗂️ تم حفظ محادثة المستخدم:", user);
+  } catch (err) {
+    console.error("⚠️ فشل الحفظ في Drive:", err.message);
+  }
+}
 
-  const from = data.from || data.sender || data.to;
-  const message = data.body?.trim();
-  if (!from || !message) return;
+// معالجة الذكاء الاصطناعي
+async function aiReply(prompt) {
+  try {
+    const res = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "أنت مساعد افتراضي ذكي باسم (مسعود) خاص بمتجر eSelect العماني. تتحدث باللهجة العمانية باحترام وود. تجاوب العملاء حول المنتجات، الطلبات، الأسعار، مدة الشحن، السياسات، والاستبدال. لا تذكر معلومات غير مؤكدة. إذا لم تجد معلومة قل بلطف: 'ما متأكد من هذا الشي، بس ممكن أتحقق لك'.",
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+    return res.choices[0].message.content;
+  } catch (err) {
+    console.error("❌ خطأ من OpenAI:", err.message);
+    return "⚠️ صار خلل مؤقت في النظام. حاول مرة ثانية.";
+  }
+}
 
-  if (!messageQueue[from]) messageQueue[from] = [];
-  messageQueue[from].push(message);
+// ===================== MESSAGE HANDLER =====================
+async function processMessages(phone, fullText) {
+  console.log("🧠 معالجة", phone + ":", fullText);
 
-  if (messageQueue[from].timeout) clearTimeout(messageQueue[from].timeout);
+  // حفظ في Google Drive (ذاكرة)
+  await saveToDrive(phone, fullText);
 
-  messageQueue[from].timeout = setTimeout(async () => {
-    const fullMsg = messageQueue[from].join(" ");
-    delete messageQueue[from];
-
-    console.log(`🧠 معالجة ${from}: ${fullMsg}`);
-    appendUserMemory(from, fullMsg);
-
-    let reply = await generateReply(from, fullMsg);
-    if (!reply) reply = getFollowUpMessage(from);
-
-    await sendWhatsAppMessage(from, reply);
-  }, MESSAGE_DELAY);
-});
-
-// ================== إرسال تقرير أسبوعي ==================
-cron.schedule("0 9 * * MON", async () => {
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: SUPPORT_EMAIL,
-      pass: process.env.EMAIL_PASS
+  // حالة الطلب
+  if (/(\d{3,6})/.test(fullText) && /(طلب|طلبي|طلبية|order|طلباتي)/i.test(fullText)) {
+    const orderId = fullText.match(/\d{3,6}/)[0];
+    const order = await fetchOrder(orderId);
+    if (order) {
+      await sendMessage(
+        phone,
+        `🔎 حالة طلبك #${orderId}: ${order.fulfillment_status || "قيد المعالجة"}\n💰 المجموع: ${order.total_price} ${order.currency}`
+      );
+      return;
+    } else {
+      await sendMessage(phone, "❌ ما حصلت رقم الطلب هذا في النظام، تأكد منه لو سمحت.");
+      return;
     }
-  });
+  }
 
-  const report = `
-📊 تقرير أسبوعي - Masoud AI
-عدد المستخدمين: ${Object.keys(customersMemory).length}
-عدد المنتجات المحفوظة: ${productsCache.length}
-آخر تحديث: ${new Date().toLocaleString()}
-  `;
+  // المنتجات
+  if (/منتج|منتجات|عروض|جديد|خصم|ساعات|ألعاب|الكترونيات|لبان/i.test(fullText)) {
+    const products = await fetchProducts();
+    if (products.length === 0) {
+      await sendMessage(phone, "📦 حالياً ما في منتجات معروضة لأن المتجر في صيانة مؤقتة.");
+      return;
+    }
+    const randoms = products.slice(0, 3).map((p) => `🛍️ ${p.title} - ${p.variants[0].price} OMR`);
+    await sendMessage(phone, `بعض المنتجات المتوفرة:\n${randoms.join("\n")}`);
+    return;
+  }
 
-  await transporter.sendMail({
-    from: SUPPORT_EMAIL,
-    to: SUPPORT_EMAIL,
-    subject: "Masoud AI | التقرير الأسبوعي",
-    text: report
-  });
-  console.log("📨 تم إرسال التقرير الأسبوعي بنجاح");
+  // استفسارات عامة
+  const reply = await aiReply(fullText);
+  await sendMessage(phone, reply);
+}
+
+// ===================== WHATSAPP WEBHOOK =====================
+app.post("/webhook", async (req, res) => {
+  try {
+    const data = req.body;
+    const from = data?.data?.from;
+    const text = data?.data?.body?.trim();
+
+    if (!from || !text) return res.sendStatus(200);
+
+    if (!sessions[from]) sessions[from] = { messages: [] };
+    sessions[from].messages.push(text);
+
+    clearTimeout(pendingReplies[from]);
+    pendingReplies[from] = setTimeout(async () => {
+      const fullText = sessions[from].messages.join(" ");
+      sessions[from].messages = [];
+      await processMessages(from, fullText);
+    }, 10000); // انتظار 10 ثواني بعد آخر رسالة
+  } catch (err) {
+    console.error("❌ Webhook Error:", err.message);
+  }
+  res.sendStatus(200);
 });
 
-// ================== تشغيل السيرفر ==================
-const port = PORT || 3000;
-app.listen(port, () => {
-  console.log(`🚀 eSelect | Masoud AI Bot يعمل على المنفذ ${port}`);
+// ===================== START =====================
+app.listen(PORT, () => {
+  console.log(`🚀 eSelect | Masoud AI Bot يعمل على المنفذ ${PORT}`);
 });
