@@ -1,13 +1,20 @@
 {
   "name": "eselect-whatsapp-bot",
   "version": "1.0.0",
-  "main": "server.js",
+  "description": "WhatsApp AI Bot for eSelect integrated with Ultramsg, ChatGPT (OpenAI), and Shopify",
+  "main": "server.cjs",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.cjs"
   },
   "dependencies": {
-    "axios": "^1.6.8",
+    "axios": "^1.7.4",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "dotenv": "^16.4.5"
-  }
+    "openai": "^4.67.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
 }
