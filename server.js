@@ -1,10 +1,9 @@
-import express from "express";
-import axios from "axios";
-import bodyParser from "body-parser";
-import fs from "fs";
-import { google } from "googleapis";
-import dotenv from "dotenv";
-dotenv.config();
+const express = require("express");
+const axios = require("axios");
+const bodyParser = require("body-parser");
+const fs = require("fs");
+const { google } = require("googleapis");
+require("dotenv").config();
 
 const app = express();
 app.use(bodyParser.json());
@@ -17,27 +16,16 @@ const auth = new google.auth.GoogleAuth({
 });
 const drive = google.drive({ version: "v3", auth });
 
-// ============ MEMORY & CACHE ============
+// ============ MEMORY ============
 const memoryFileId = "1VrfDaD-T-3UptZXVILYvrDVnmzmq7g0E";
 let messageCache = {};
-let userMemory = {}; // محفوظ في الذاكرة و Drive
+let lastMessageTime = {};
 
-// تحميل البيانات من Google Drive عند بدء السيرفر
-async function loadMemory() {
-  try {
-    const res = await drive.files.list({ q: `'${memoryFileId}' in parents` });
-    console.log("📁 ذاكرة Google Drive متصلة:", res.data.files.length);
-  } catch (err) {
-    console.error("⚠️ فشل تحميل الذاكرة:", err.message);
-  }
-}
-loadMemory();
-
-// ============ HELPER FUNCTIONS ============
 function delay(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
+// ============ SEND MESSAGE ============
 async function sendMessage(to, message) {
   try {
     await axios.post(`https://api.ultramsg.com/${process.env.ULTRAMSG_INSTANCE}/messages/chat`, {
@@ -51,6 +39,7 @@ async function sendMessage(to, message) {
   }
 }
 
+// ============ CHATGPT RESPONSE ============
 async function getChatGPTResponse(prompt) {
   try {
     const res = await axios.post(
@@ -60,11 +49,7 @@ async function getChatGPTResponse(prompt) {
         messages: [
           {
             role: "system",
-            content: `أنت ماسعود، مساعد متجر eSelect الذكي. 
-            تجاوب باللهجة العمانية بأسلوب ودود. 
-            تجيب عن المنتجات، الطلبات، الأسعار، الضمان، الدفع، والشحن.
-            إذا المنتج أو الطلب غير متوفر، قل "ما متوفر حاليا".
-            لا ترد بكلمة "كيف يمكنني مساعدتك اليوم؟" أكثر من مرة بالمحادثة الواحدة.`,
+            content: `أنت ماسعود، مساعد eSelect الذكي باللهجة العمانية. تجاوب بطريقة ودودة ومهذبة. إذا تكررت الأسئلة لا تكرر نفس الرد.`,
           },
           { role: "user", content: prompt },
         ],
@@ -78,6 +63,7 @@ async function getChatGPTResponse(prompt) {
   }
 }
 
+// ============ SHOPIFY ORDER ============
 async function getOrderStatus(orderId) {
   try {
     const res = await axios.get(
@@ -91,6 +77,7 @@ async function getOrderStatus(orderId) {
   }
 }
 
+// ============ SHOPIFY PRODUCTS ============
 async function searchProducts(query) {
   try {
     const res = await axios.get(
@@ -98,46 +85,38 @@ async function searchProducts(query) {
       { headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN } }
     );
     const items = res.data.products;
-    if (!items.length) return "لم أجد هذا المنتج في المتجر.";
-    const first = items[0];
-    return `📦 المنتج: ${first.title}\n💰 السعر: ${first.variants[0].price} ${first.variants[0].currency || "OMR"}\n🔗 ${first.online_store_url || "https://eselect.store"}`;
-  } catch {
-    return "⚠️ ما قدرت أوصل لبيانات المنتجات حالياً.";
+    if (!items.length) return "ما حصلت منتجات بهذا الاسم.";
+    const p = items[0];
+    return `📦 ${p.title}\n💰 ${p.variants[0].price} OMR\n🔗 https://eselect.store/products/${p.handle}`;
+  } catch (err) {
+    console.error("❌ Shopify Error:", err.message);
+    return "⚠️ ما قدرت أجيب بيانات المنتجات.";
   }
 }
 
-// ============ CORE BOT LOGIC ============
-const lastMessageTime = {};
-
+// ============ WEBHOOK ============
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
-  const data = req.body;
-  const from = data.from;
-  const message = data.body?.trim();
-
-  if (!from || !message) return;
-  console.log(`📩 رسالة جديدة من ${from}: ${message}`);
+  const { from, body } = req.body;
+  if (!from || !body) return;
+  console.log(`📩 رسالة جديدة من ${from}: ${body}`);
 
   const now = Date.now();
   lastMessageTime[from] = now;
-
   if (!messageCache[from]) messageCache[from] = [];
-  messageCache[from].push(message);
+  messageCache[from].push(body.trim());
 
   await delay(10000);
-
-  if (Date.now() - lastMessageTime[from] < 10000) return; // لا ترد إذا أرسل بعدها
+  if (Date.now() - lastMessageTime[from] < 10000) return;
 
   const fullMessage = messageCache[from].join(" ");
   messageCache[from] = [];
-
   console.log(`🧠 معالجة ${from}: ${fullMessage}`);
 
-  // تحليل نوع الرسالة
   let reply;
   if (/(\d{3,6})/.test(fullMessage)) {
-    const orderId = fullMessage.match(/(\d{3,6})/)[0];
-    reply = await getOrderStatus(orderId);
+    const id = fullMessage.match(/(\d{3,6})/)[0];
+    reply = await getOrderStatus(id);
   } else if (/منتج|منتجات|سعر|كم|يتوفر/.test(fullMessage)) {
     reply = await searchProducts(fullMessage);
   } else {
@@ -146,7 +125,7 @@ app.post("/webhook", async (req, res) => {
 
   await sendMessage(from, reply);
 
-  // حفظ في Google Drive
+  // حفظ المحادثة في Google Drive
   try {
     await drive.files.create({
       requestBody: {
@@ -163,12 +142,10 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ============ DEFAULT ROUTE ============
+// ============ HOME ============
 app.get("/", (req, res) => {
   res.send("🚀 eSelect | Masoud AI Bot يعمل بنجاح!");
 });
 
-// ============ START SERVER ============
-app.listen(PORT, () => {
-  console.log(`🚀 eSelect | Masoud AI Bot يعمل على المنفذ ${PORT}`);
-});
+// ============ RUN ============
+app.listen(PORT, () => console.log(`🚀 eSelect Bot يعمل على المنفذ ${PORT}`));
