@@ -11,7 +11,8 @@ const PORT = process.env.PORT || 3000;
 
 // ============ GOOGLE DRIVE CONFIG ============
 const auth = new google.auth.GoogleAuth({
-  credentials: JSON.parse(fs.readFileSync("eselect-bot-storage-3268fdefd526.json", "utf8")),
+  credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
+
   scopes: ["https://www.googleapis.com/auth/drive.file"],
 });
 const drive = google.drive({ version: "v3", auth });
