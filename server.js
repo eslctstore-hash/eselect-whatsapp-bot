@@ -1,14 +1,14 @@
 // ==========================
-// 🧠 eSelect WhatsApp Bot v3.0 (Advanced)
+// 🧠 eSelect WhatsApp Bot v3.1 (Stable & Patched)
 // Powered by Ultramsg + ChatGPT + Shopify + Google Drive
 // ==========================
 
-import fs from 'fs';
 import express from "express";
 import axios from "axios";
 import { google } from "googleapis";
 import cron from "node-cron";
 import stream from "stream";
+import fs from 'fs'; // <-- تم التأكد من وجود هذه الإضافة
 
 const app = express();
 app.use(express.json());
@@ -24,18 +24,49 @@ const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
 
-// متغيرات Google Drive الجديدة
+// متغيرات Google Drive
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
-const credentialsPath = process.env.GOOGLE_SERVICE_ACCOUNT_CREDENTIALS;
 
 // ==========================
 // 📦 متغيرات النظام الداخلية
 // ==========================
-const lastMessages = new Map(); // لتجميع رسائل العملاء
-const userConversations = new Map(); // ذاكرة ذكية للمحادثات السابقة
-const lastResponseTime = new Map(); // لتجنب الرد مرتين
-const shopifyCache = { products: [], storeStatus: "open" }; // كاش لبيانات المتجر
-const REPLY_DELAY_MS = 10000; // انتظار 10 ثوانٍ للرد
+const lastMessages = new Map();
+const userConversations = new Map();
+const lastResponseTime = new Map();
+const shopifyCache = { products: [], storeStatus: "open" };
+const REPLY_DELAY_MS = 10000;
+
+// ==========================
+// ☁️ إعداد Google Drive (الكود المُحسَّن والآمن)
+// ==========================
+
+// 1. تعريف المتغير في النطاق العام ليكون متاحاً دائماً
+let serviceAccountCredentials = {};
+const credentialsPath = process.env.GOOGLE_SERVICE_ACCOUNT_CREDENTIALS;
+
+// 2. التحقق من وجود مسار الملف ومحاولة قراءته بأمان
+if (credentialsPath) {
+  try {
+    const credentialsJson = fs.readFileSync(credentialsPath, 'utf8');
+    serviceAccountCredentials = JSON.parse(credentialsJson);
+    console.log("✅ Google Drive credentials loaded successfully.");
+  } catch (error) {
+    console.error("❌ Fatal Error: Could not read or parse the Google credentials file.", error);
+    // إيقاف التطبيق إذا كانت بيانات جوجل ضرورية للعمل
+    process.exit(1);
+  }
+} else {
+  console.warn("⚠️ Warning: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS path not set. Google Drive features will be disabled.");
+}
+
+// 3. استخدام المتغير الذي تم تعريفه بأمان
+const drive = google.drive({
+  version: "v3",
+  auth: new google.auth.GoogleAuth({
+    credentials: serviceAccountCredentials,
+    scopes: ["https://www.googleapis.com/auth/drive"],
+  }),
+});
 
 // ==========================
 // 🧰 دوال مساعدة
@@ -56,20 +87,9 @@ async function sendMessage(to, message) {
   }
 }
 
-// ==========================
-// ☁️ دوال Google Drive
-// ==========================
-const drive = google.drive({
-  version: "v3",
-  auth: new google.auth.GoogleAuth({
-    credentials: GOOGLE_SERVICE_ACCOUNT_CREDENTIALS,
-    scopes: ["https://www.googleapis.com/auth/drive"],
-  }),
-});
-
 // حفظ المحادثة في Google Drive
 async function saveConversationToDrive(customer, conversation) {
-  if (!GOOGLE_DRIVE_FOLDER_ID) return;
+  if (!GOOGLE_DRIVE_FOLDER_ID || !serviceAccountCredentials.client_email) return;
   try {
     const fileName = `${customer}_${new Date().toISOString().split("T")[0]}.txt`;
     const fileMetadata = {
@@ -98,7 +118,7 @@ async function saveConversationToDrive(customer, conversation) {
 
 // استرجاع المحادثات السابقة
 async function getPreviousConversation(customer) {
-  if (!GOOGLE_DRIVE_FOLDER_ID) return "";
+  if (!GOOGLE_DRIVE_FOLDER_ID || !serviceAccountCredentials.client_email) return "";
   try {
     const res = await drive.files.list({
       q: `'${GOOGLE_DRIVE_FOLDER_ID}' in parents and name contains '${customer}'`,
@@ -130,10 +150,10 @@ async function refreshShopifyCache() {
       headers: { "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN },
     });
     shopifyCache.products = res.data.products;
-    shopifyCache.storeStatus = "open"; // المتجر متاح
+    shopifyCache.storeStatus = "open";
     console.log("🔄 Shopify cache updated successfully.");
   } catch (err) {
-    shopifyCache.storeStatus = "maintenance"; // المتجر في صيانة
+    shopifyCache.storeStatus = "maintenance";
     console.error("⚠️ Shopify store is currently unavailable.");
   }
 }
@@ -192,7 +212,6 @@ async function fetchStorePolicy(keyword) {
 // 🤖 الرد الذكي عبر ChatGPT
 // ==========================
 async function generateAIReply(userMessage, previousContext) {
-    // التحقق من حالة المتجر أولاً
     if (shopifyCache.storeStatus === "maintenance") {
         return "يبدو أن المتجر حالياً في صيانة مؤقتة، يمكنك العودة لاحقاً. 🙏";
     }
@@ -214,7 +233,6 @@ async function generateAIReply(userMessage, previousContext) {
             }
         }
         
-        // بناء سياق المحادثة لـ ChatGPT
         const messages = [
             {
                 role: "system",
@@ -226,13 +244,6 @@ async function generateAIReply(userMessage, previousContext) {
             messages.push({ role: "system", content: "هذه محادثة سابقة مع نفس العميل:\n" + previousContext});
         }
         
-        // تجنب تكرار التحية إذا كانت المحادثة مستمرة
-        if (userConversations.has(userMessage.from) && !previousContext.includes("مرحباً")) {
-            // المحادثة مستمرة
-        } else {
-            // لا داعي لإضافة شيء هنا، التحية الافتراضية جيدة
-        }
-
         messages.push({ role: "user", content: userMessage });
 
         const response = await axios.post(
@@ -251,7 +262,6 @@ async function generateAIReply(userMessage, previousContext) {
         return "⚠️ حدث خلل مؤقت في النظام. حاول لاحقًا.";
     }
 }
-
 
 // ==========================
 // 🔔 استقبال الرسائل من Ultramsg Webhook
@@ -279,19 +289,16 @@ app.post("/webhook", async (req, res) => {
             const allMsgsText = lastMessages.get(from).join(" ");
             lastMessages.delete(from);
             
-            // استرجاع المحادثة السابقة
             let previousContext = userConversations.get(from) || await getPreviousConversation(from);
 
             console.log(`🧠 معالجة ${from}: ${allMsgsText}`);
             const reply = await generateAIReply(allMsgsText, previousContext);
             
-            // تحديث سجل المحادثة
             const newConversation = `${previousContext}\nالعميل: ${allMsgsText}\nالبوت: ${reply}`;
             userConversations.set(from, newConversation);
             
             await sendMessage(from, reply);
             
-            // حفظ المحادثة الكاملة
             await saveConversationToDrive(from, newConversation);
         }
     }, REPLY_DELAY_MS);
@@ -300,22 +307,16 @@ app.post("/webhook", async (req, res) => {
 // ==========================
 // 📅 المهام المجدولة (Cron Jobs)
 // ==========================
-// تحديث كاش Shopify كل 30 دقيقة
 cron.schedule("*/30 * * * *", refreshShopifyCache);
 
-// إعادة التدريب ورفع التقارير كل يوم جمعة الساعة 3 صباحاً
 cron.schedule("0 3 * * 5", async () => {
     console.log("🦾 Starting weekly training and reporting...");
-    // هنا يمكن إضافة منطق إعادة التدريب
-    // ورفع تقرير إلى Google Drive
 });
-
 
 // ==========================
 // 🚀 تشغيل السيرفر
 // ==========================
 app.listen(PORT, () => {
     console.log(`🚀 eSelect WhatsApp Bot is running on port ${PORT}`);
-    // التحديث الأولي عند بدء التشغيل
     refreshShopifyCache();
 });
