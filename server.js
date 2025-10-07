@@ -3,6 +3,7 @@
 // Powered by Ultramsg + ChatGPT + Shopify + Google Drive
 // ==========================
 
+import fs from 'fs';
 import express from "express";
 import axios from "axios";
 import { google } from "googleapis";
