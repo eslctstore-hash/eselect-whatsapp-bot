@@ -26,9 +26,7 @@ const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || "2024-10";
 
 // متغيرات Google Drive الجديدة
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
-const GOOGLE_SERVICE_ACCOUNT_CREDENTIALS = JSON.parse(
-  process.env.GOOGLE_SERVICE_ACCOUNT_CREDENTIALS || "{}"
-);
+const credentialsPath = process.env.GOOGLE_SERVICE_ACCOUNT_CREDENTIALS;
 
 // ==========================
 // 📦 متغيرات النظام الداخلية
