@@ -1,15 +1,16 @@
 {
-  "name": "eselect-masoud-ai",
-  "version": "5.0.0",
+  "name": "eselect-whatsapp-bot",
+  "version": "3.0.0",
+  "description": "WhatsApp chatbot for eSelect store using Ultramsg, Shopify, and ChatGPT with Google Drive integration",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.7.4",
-    "body-parser": "^1.20.2",
-    "dotenv": "^16.4.5",
+    "axios": "^1.7.0",
     "express": "^4.19.2",
-    "googleapis": "^131.0.0"
+    "googleapis": "^140.0.1",
+    "node-cron": "^3.0.3"
   }
 }
