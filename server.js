@@ -109,6 +109,7 @@ async function saveConversationToDrive(customer, conversation) {
       resource: fileMetadata,
       media: media,
       fields: "id",
+      supportsAllDrives: true,
     });
     console.log(`📑 Conversation for ${customer} saved to Google Drive.`);
   } catch (err) {
