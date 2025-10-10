@@ -1,5 +1,5 @@
 // ==========================
-// 🧠 eSelect WhatsApp Bot v3.3 (Multi-Language Support)
+// 🧠 eSelect WhatsApp Bot v3.4 (ChatGPT URL Fix)
 // Powered by Ultramsg + ChatGPT + Shopify + Google Drive
 // ==========================
 
@@ -53,7 +53,6 @@ const drive = google.drive({
   }),
 });
 
-// === دالة جديدة لاكتشاف اللغة ===
 function detectLanguage(text) {
   const arabicRegex = /[\u0600-\u06FF]/;
   return arabicRegex.test(text) ? 'ar' : 'en';
@@ -114,7 +113,6 @@ async function getPreviousConversation(customer) {
   }
 }
 
-// ... (دوال Shopify تبقى كما هي)
 async function refreshShopifyCache() {
   try {
     const url = `${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
@@ -127,6 +125,7 @@ async function refreshShopifyCache() {
     console.error("⚠️ Shopify store is currently unavailable. Error: " + (err.response?.data?.errors || err.message));
   }
 }
+
 function searchProductInCache(query) {
   const product = shopifyCache.products.find((p) => p.title.toLowerCase().includes(query.toLowerCase()));
   if (product) {
@@ -135,6 +134,7 @@ function searchProductInCache(query) {
     return `📦 المنتج: ${product.title}\n💰 السعر: ${variant?.price || "غير محدد"} ر.ع\n📦 الحالة: ${available}`;
   } return "لم أجد هذا المنتج في المتجر.";
 }
+
 async function fetchOrderByNumber(orderNumber) {
     try {
         const url = `${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/orders.json?name=${orderNumber}`;
@@ -147,6 +147,7 @@ async function fetchOrderByNumber(orderNumber) {
         } else return "⚠️ لم أجد أي طلب بهذا الرقم.";
     } catch { return "⚠️ تعذر التحقق من الطلب حالياً."; }
 }
+
 async function fetchStorePolicy(keyword) {
     const map = { "الشحن": "shipping", "الإرجاع": "return", "الخصوصية": "privacy", "الشروط": "terms" };
     const handle = map[keyword]; if (!handle) return null;
@@ -158,15 +159,12 @@ async function fetchStorePolicy(keyword) {
     } catch { return null; }
 }
 
-
-// === تعديل دالة الرد الذكي لدعم اللغتين ===
 async function generateAIReply(userMessage, previousContext) {
     if (shopifyCache.storeStatus === "maintenance") {
         return "يبدو أن المتجر حالياً في صيانة مؤقتة، يمكنك العودة لاحقاً. 🙏";
     }
 
     try {
-        // ... (التحقق من الطلبات والمنتجات والسياسات يبقى كما هو)
         const orderMatch = userMessage.match(/#?\d{3,6}/);
         if (orderMatch) return await fetchOrderByNumber(orderMatch[0].replace("#", ""));
         if (userMessage.includes("منتج") || userMessage.includes("سعر") || userMessage.includes("متوفر")) {
@@ -181,7 +179,6 @@ async function generateAIReply(userMessage, previousContext) {
             }
         }
         
-        // --- الجزء الجديد: تحديد اللغة واختيار التعليمات ---
         const lang = detectLanguage(userMessage);
         
         const prompts = {
@@ -200,7 +197,7 @@ async function generateAIReply(userMessage, previousContext) {
         messages.push({ role: "user", content: userMessage });
 
         const response = await axios.post(
-            "https.api.openai.com/v1/chat/completions",
+            "https://api.openai.com/v1/chat/completions", // <-- تم إصلاح الرابط هنا
             { model: "gpt-4o-mini", messages, max_tokens: 300 },
             { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
         );
@@ -212,7 +209,6 @@ async function generateAIReply(userMessage, previousContext) {
     }
 }
 
-// ... (باقي الكود الخاص بالـ Webhook والـ Cron Jobs يبقى كما هو)
 app.post("/webhook", async (req, res) => {
     res.sendStatus(200);
     const msg = req.body;
