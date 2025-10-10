@@ -1,5 +1,5 @@
 // ==========================
-// 🧠 eSelect WhatsApp Bot v3.4 (ChatGPT URL Fix)
+// 🧠 eSelect WhatsApp Bot v3.5 (Crash Handler & Stability)
 // Powered by Ultramsg + ChatGPT + Shopify + Google Drive
 // ==========================
 
@@ -10,10 +10,24 @@ import cron from "node-cron";
 import stream from "stream";
 import fs from 'fs';
 
+// ==========================
+// 🛡️ معالج الأخطاء الشامل (CRASH HANDLER)
+// لالتقاط أي خطأ غير متوقع ومنع توقف البوت بصمت
+// ==========================
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('CRITICAL ERROR: Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err, origin) => {
+  console.error('CRITICAL ERROR: Uncaught Exception:', err, 'Origin:', origin);
+});
+
+
 const app = express();
 app.use(express.json());
 
-// ... (جميع متغيرات البيئة تبقى كما هي)
+// ... (باقي الكود يبقى كما هو تمامًا)
+// ... (The rest of the code remains exactly the same)
 const PORT = process.env.PORT || 3000;
 const ULTRAMSG_INSTANCE_ID = process.env.ULTRAMSG_INSTANCE_ID;
 const ULTRAMSG_TOKEN = process.env.ULTRAMSG_TOKEN;
@@ -63,7 +77,6 @@ async function sendMessage(to, message) {
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
     const response = await axios.post(url, { token: ULTRAMSG_TOKEN, to, body: message });
     console.log(`✅ Sent to ${to}: ${message}`);
-    // السطر التالي سيطبع لنا الاستجابة الكاملة من سيرفر Ultramsg
     console.log(">>> Ultramsg API Response:", JSON.stringify(response.data));
   } catch (err) {
     console.error("❌ Send Error:", err.response?.data || err.message);
@@ -199,7 +212,7 @@ async function generateAIReply(userMessage, previousContext) {
         messages.push({ role: "user", content: userMessage });
 
         const response = await axios.post(
-            "https://api.openai.com/v1/chat/completions", // <-- تم إصلاح الرابط هنا
+            "https://api.openai.com/v1/chat/completions",
             { model: "gpt-4o-mini", messages, max_tokens: 300 },
             { headers: { Authorization: `Bearer ${OPENAI_API_KEY}` } }
         );
