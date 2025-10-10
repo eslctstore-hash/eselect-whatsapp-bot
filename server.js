@@ -61,8 +61,10 @@ function detectLanguage(text) {
 async function sendMessage(to, message) {
   try {
     const url = `https://api.ultramsg.com/${ULTRAMSG_INSTANCE_ID}/messages/chat`;
-    await axios.post(url, { token: ULTRAMSG_TOKEN, to, body: message });
+    const response = await axios.post(url, { token: ULTRAMSG_TOKEN, to, body: message });
     console.log(`✅ Sent to ${to}: ${message}`);
+    // السطر التالي سيطبع لنا الاستجابة الكاملة من سيرفر Ultramsg
+    console.log(">>> Ultramsg API Response:", JSON.stringify(response.data));
   } catch (err) {
     console.error("❌ Send Error:", err.response?.data || err.message);
   }
