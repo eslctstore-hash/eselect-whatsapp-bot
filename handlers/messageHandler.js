@@ -1,7 +1,11 @@
 // handlers/messageHandler.js
 // ----------------------------------------------------------------
-// (إصلاح 1): تمت إضافة فلتر للـ event_type و fromMe لإيقاف الحلقة اللانهائية
-// (إصلاح 2): تمت إضافة دعم لـ "ptt" (الرسائل الصوتية)
+// (تحديث احترافي V2.0)
+// - تم إصلاح الحلقة اللانهائية (بشكل كامل)
+// - تم إضافة "الذاكرة" (Session Manager)
+// - تم إضافة "التحقق الأمني" للطلبات
+// - تم إصلاح منطق البحث (Intent -> Shopify)
+// - تم إضافة دعم الرسائل المقتبسة (Quoted Messages)
 // ----------------------------------------------------------------
 
 const ultramsg = require('../core/ultramsg');
@@ -13,153 +17,196 @@ const graphApi = require('../core/graphApi');
 const googleSheets = require('../crm/googleSheets');
 const tts = require('../ai/tts');
 const drive = require('../core/googleDrive');
+const session = require('../core/sessionManager'); // (جديد) مدير الذاكرة
 
 async function handleWebhook(payload) {
-  // ----------------------------------------------------------------
   // [** إصلاح الحلقة اللانهائية **]
-  // 1. تجاهل أي شيء ليس رسالة مستلمة جديدة
-  if (payload.event_type !== 'message_received') {
-    return; // نتجاهل إشعارات "message_create" و "message_ack"
+  if (payload.event_type !== 'message_received' || !payload.data || payload.data.fromMe) {
+    return; // تجاهل كل شيء ليس رسالة واردة من عميل
   }
-  // 2. تجاهل الرسائل الصادرة من البوت نفسه (احتياطي)
-  if (!payload.data || payload.data.fromMe) {
-    return;
-  }
-  // ----------------------------------------------------------------
 
-  // استخراج البيانات الأساسية من رسالة Ultramsg
   const messageData = payload.data;
-  const from = messageData.from; // رقم العميل
-  const name = messageData.pushname; // اسم العميل
-  const type = messageData.type; // نوع الرسالة (chat, image, ptt)
-  const body = messageData.body; // محتوى الرسالة النصية
-  const mediaUrl = messageData.media; // رابط الصورة أو الصوت
+  const from = messageData.from;
+  const name = messageData.pushname;
+  const type = messageData.type;
+  const body = messageData.body;
+  const mediaUrl = messageData.media;
+  const quotedMsg = messageData.quotedMsg; // (جديد) الرسالة المقتبسة
 
-  let textInput = body; // النص الذي سيتم تحليله
-  let intent = 'General';
+  let textInput = body;
   let responseText = '';
-  let orderNo = null;
+  let logIntent = 'General';
+  let logOrderNo = null;
+  let isAudioResponse = false;
 
   try {
-    // 1. إرسال "جاري الكتابة" (المرحلة 7)
     await ultramsg.sendTypingIndicator(from);
 
-    // 2. تحليل الوسائط (المرحلة 2)
-    if (type === 'image') {
-      if (!mediaUrl) {
-        console.log('Image message received, but media URL is empty.');
-        textInput = 'صورة (خطأ في الرابط)';
-      } else {
-        console.log('Analyzing image...');
-        textInput = await vision.analyzeImage(mediaUrl);
-        console.log('Vision Analysis (Keywords):', textInput);
-        intent = 'Product (Vision)';
-      }
-    } 
-    // [** إصلاح الرسائل الصوتية **]
-    // Ultramsg يرسل "ptt" وليس "voice"
-    else if (type === 'voice' || type === 'ptt') { 
-      if (!mediaUrl) {
-         console.log('Audio message received, but media URL is empty.');
-         textInput = 'صوت (خطأ في الرابط)';
-      } else {
-        console.log('Transcribing audio (ptt)...');
-        textInput = await audio.transcribeAudio(mediaUrl);
-        console.log('Whisper Transcription:', textInput);
-        intent = 'Product (Voice)';
-      }
-    } 
-    else if (type === 'chat' && (body.includes('http://') || body.includes('https://'))) {
-        if (body.includes('facebook.com') || body.includes('instagram.com')) {
-            intent = 'Social Media Link';
-        } else {
-            intent = 'General Link';
-        }
+    // [** التطوير الاحترافي: التحقق من الذاكرة (State) أولاً **]
+    const currentState = session.getState(from);
+    if (currentState) {
+      console.log(`[State] Handling state: ${currentState.state}`);
+      if (currentState.state === 'awaiting_order_number') {
+        // العميل أرسل رقم الطلب
         textInput = body;
-    }
+        responseText = await handleOrderVerification(from, textInput);
+        logIntent = 'Order (State)';
+        logOrderNo = textInput;
+      } else if (currentState.state === 'awaiting_order_verification') {
+         // العميل أرسل الإيميل/الهاتف للتحقق
+         const orderNumber = currentState.context.orderNumber;
+         const order = await shopify.getOrderByNumber(orderNumber);
+         if (body.toLowerCase() === order.email.toLowerCase() || body.includes(order.phone.substring(1))) {
+             responseText = formatOrderDetails(order);
+             session.clearState(from);
+         } else {
+             responseText = 'المعلومات غير متطابقة. لا يمكن عرض تفاصيل الطلب. يرجى المحاولة مرة أخرى.';
+             session.clearState(from);
+         }
+      }
+      
+      session.clearState(from); // تنظيف الذاكرة بعد الاستخدام
 
-    // 3. فهم نية العميل (المرحلة 3)
-    // (نقوم بتصنيف النية فقط إذا لم تكن صورة أو صوت)
-    if (type === 'chat') {
-        intent = await intentEngine.getIntent(textInput);
-        console.log(`Intent classified as: ${intent}`);
-    }
+    } else {
+      // --- لا يوجد حالة سابقة، نبدأ تحليل جديد ---
 
-    // 4. توليد الرد بناءً على النية (المراحل 4 و 6)
-    switch (intent) {
-      case 'Order':
-        // TODO: استخراج رقم الطلب أو الهاتف من textInput
-        const orderId = textInput.match(/\d+/); // مثال بسيط
-        if (orderId) {
-          const order = await shopify.getOrderStatus(orderId[0]);
-          responseText = `مرحباً ${name}، حالة طلبك #${order.id} هي ${order.status}.`;
-          orderNo = order.id;
-        } else {
-          responseText = 'الرجاء تزويدي برقم الطلب أو رقم الهاتف المرتبط بالطلب.';
-        }
-        break;
+      // 1. تحليل الوسائط (إذا وجدت)
+      if (type === 'image' && mediaUrl) {
+        textInput = await vision.analyzeImage(mediaUrl);
+        logIntent = 'Product (Vision)';
+      } else if ((type === 'voice' || type === 'ptt') && mediaUrl) {
+        textInput = await audio.transcribeAudio(mediaUrl);
+        logIntent = 'Product (Voice)';
+        isAudioResponse = true; // الرد يجب أن يكون صوتياً
+      } else if (quotedMsg && quotedMsg.body) {
+        // (جديد) فهم الرسائل المقتبسة
+        textInput = `${body}\n\n[الرسالة المقتبسة]: ${quotedMsg.body}`;
+        console.log(`[Quoted] Handling quoted message: ${textInput}`);
+      }
 
-      case 'Product':
-      case 'Product (Vision)':
-      case 'Product (Voice)':
-        const products = await shopify.searchProduct(textInput);
-        if (products.length > 0) {
-          const p = products[0];
-          responseText = `وجدنا المنتج: ${p.title}\nالسعر: ${p.variants[0].price} ${p.currency}\n${p.product_url}`;
-        } else {
-          responseText = `عذراً ${name}، لم أتمكن من إيجاد منتج يطابق "${textInput}". هل يمكنك وصفه بشكل مختلف؟`;
-        }
-        break;
+      // 2. [** إصلاح المنطق **] إرسال النص (من الدردشة أو الصوت أو الاقتباس) إلى محرك النوايا
+      const analysis = await intentEngine.analyzeIntent(textInput);
+      logIntent = analysis.intent;
+      const entities = analysis.entities || {};
 
-      case 'Complaint':
-        responseText = `نأسف جداً لسماع ذلك ${name}. سيتم تحويل شكواك إلى الفريق المختص. هل يمكنك تزويدنا بتفاصيل إضافية؟`;
-        break;
+      // 3. توجيه الطلب
+      switch (analysis.intent) {
+        case 'OrderInquiry':
+          const orderNumber = entities.order_number || body.match(/\d+/);
+          if (orderNumber) {
+            logOrderNo = orderNumber;
+            responseText = await handleOrderVerification(from, orderNumber.toString());
+          } else {
+            responseText = 'بالتأكيد، الرجاء تزويدي برقم الطلب الذي يبدأ بـ #.';
+            session.setState(from, 'awaiting_order_number');
+          }
+          break;
+
+        case 'ProductInquiry':
+          const query = entities.product_name || textInput;
+          const products = await shopify.searchProduct(query);
+          if (products.length > 0) {
+            const p = products[0];
+            responseText = `وجدنا المنتج: ${p.title}\n${p.description.substring(0, 100)}...\n\nالسعر: ${p.price} ${p.currency}\nالمخزون: ${p.stock > 0 ? 'متوفر ✅' : 'نفد ❌'}\nالرابط: ${p.product_url}`;
+            // TODO: إضافة نظام "إقناع" احترافي
+          } else {
+            responseText = `عذراً ${name}، لم أتمكن من إيجاد منتج يطابق "${query}". هل يمكنك وصفه بشكل مختلف؟`;
+          }
+          break;
         
-      case 'Social Media Link':
-        console.log('Fetching post from Graph API...');
-        const post = await graphApi.getPostDetails(textInput);
-        responseText = `شكراً لإرسال هذا الرابط. إليك محتوى المنشور:\n\n${post.message || 'لا يوجد نص'}\n\nتاريخ النشر: ${post.created_time}`;
-        break;
+        case 'LinkInquiry':
+            if (entities.link_url && (entities.link_url.includes('facebook') || entities.link_url.includes('instagram'))) {
+                const post = await graphApi.getPostDetails(entities.link_url);
+                responseText = `اطلعت على المنشور. هذا ما وجدته:\n\n${post.message || 'لا يوجد نص'}\n\nكيف يمكنني مساعدتك بخصوصه؟`;
+            } else {
+                responseText = `شكراً لإرسال الرابط ${name}. سأقوم بالاطلاع عليه. كيف يمكنني مساعدتك؟`;
+            }
+            break;
 
-      case 'General':
-      case 'General Link':
-      default:
-        responseText = `أهلاً ${name}. كيف يمكنني مساعدتك اليوم بخصوص منتجاتنا أو طلباتك؟`;
-        break;
+        case 'Complaint':
+          responseText = `نأسف جداً لسماع ذلك ${name}. سيتم تحويل شكواك إلى الفريق المختص. هل يمكنك تزويدنا بتفاصيل إضافية؟`;
+          break;
+        
+        case 'GeneralGreeting':
+        default:
+          // (احترافي) التحقق إذا كان العميل معروفاً
+          const customer = await shopify.getCustomerByPhone(from);
+          const customerName = customer ? (customer.first_name || name) : name;
+          responseText = `أهلاً ${customerName}. كيف يمكنني مساعدتك اليوم بخصوص منتجاتنا أو طلباتك؟`;
+          break;
+      }
     }
 
-    // 5. إرسال الرد
-    // هل العميل يريد رداً صوتياً؟ (بناءً على المرحلة 2)
-    if (type === 'voice' || type === 'ptt') {
+    // 5. إرسال الرد (نصي أو صوتي)
+    if (isAudioResponse) {
       console.log('Generating TTS response...');
-      // ملاحظتك التقنية: توليد صوت -> رفع لـ Drive -> إرسال رابط
       const tempAudioPath = await tts.generateTTS(responseText);
       const fileLink = await drive.uploadAudioAndGetLink(tempAudioPath);
-      const ttsMessage = `الرد الصوتي:\n${fileLink}\n\nالنص:\n${responseText}`;
-      await ultramsg.sendMessage(from, ttsMessage);
+      
+      if(fileLink) {
+        const ttsMessage = `الرد الصوتي:\n${fileLink}\n\nالنص:\n${responseText}`;
+        await ultramsg.sendMessage(from, ttsMessage);
+      } else {
+         await ultramsg.sendMessage(from, responseText); // إرسال نصي إذا فشل الرفع
+      }
+
     } else {
-      // رد نصي عادي
       await ultramsg.sendMessage(from, responseText);
     }
 
-    // 6. تسجيل المحادثة في Google Sheets (المرحلة 5)
+    // 6. تسجيل المحادثة
     await googleSheets.logToCRM({
       timestamp: new Date().toISOString(),
       name: name,
       phone: from,
       message: textInput,
-      intent: intent,
+      intent: logIntent,
       response: responseText,
-      orderNo: orderNo,
-      language: 'ar', // يمكن تطويره لاحقاً
-      sentiment: 'neutral', // يمكن تطويره لاحقاً
+      orderNo: logOrderNo,
+      language: 'ar',
+      sentiment: 'neutral',
     });
 
   } catch (error) {
-    console.error('Error in handleWebhook:', error.message);
-    // إرسال رسالة خطأ للعميل في حال الفشل
-    await ultramsg.sendMessage(from, 'عذراً، حدث خطأ فني. يرجى المحاولة مرة أخرى.');
+    console.error('Error in handleWebhook (v2):', error.message);
+    session.clearState(from); // تنظيف الذاكرة عند حدوث خطأ فادح
+    await ultramsg.sendMessage(from, 'عذراً، حدث خطأ فني فادح. تم إعادة تعيين المحادثة. يرجى المحاولة مرة أخرى.');
   }
+}
+
+/**
+ * (جديد) دالة احترافية للتعامل مع التحقق من الطلبات
+ */
+async function handleOrderVerification(customerPhone, orderNumber) {
+    const order = await shopify.getOrderByNumber(orderNumber);
+    
+    if (!order) {
+        return 'عذراً، لم أتمكن من العثور على طلب بهذا الرقم. يرجى التأكد من الرقم والمحاولة مرة أخرى.';
+    }
+
+    // [** التحقق الأمني **]
+    const customerPhoneFormatted = customerPhone.replace('@c.us', '');
+    
+    if (order.phone && order.phone.includes(customerPhoneFormatted)) {
+        // الرقم مطابق، اعرض التفاصيل
+        return formatOrderDetails(order);
+    } else {
+        // الرقم غير مطابق، اطلب التحقق
+        session.setState(customerPhone, 'awaiting_order_verification', { orderNumber });
+        return `لحماية خصوصيتك، لاحظت أن رقم الهاتف (${customerPhoneFormatted}) مختلف عن المسجل في الطلب.\n\nالرجاء إرسال **البريد الإلكتروني** أو **رقم الهاتف** المسجل في الطلب للتحقق.`;
+    }
+}
+
+/**
+ * (جديد) دالة لتنسيق رد تفاصيل الطلب
+ */
+function formatOrderDetails(order) {
+    return `تفاصيل طلبك #${order.id}:\n\n` +
+           `الحالة: ${order.status}\n` +
+           `الإجمالي: ${order.total}\n` +
+           `المنتجات:\n${order.items}\n` +
+           `العنوان: ${order.address}\n\n` +
+           `هل لديك أي استفسارات أخرى؟`;
 }
 
 module.exports = { handleWebhook };
