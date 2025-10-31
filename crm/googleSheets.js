@@ -1,6 +1,7 @@
 // crm/googleSheets.js
 // ----------------------------------------------------------------
 // وحدة تسجيل المحادثات (CRM) في Google Sheets
+// (تم إصلاح خطأ 'sheetName is not defined')
 // ----------------------------------------------------------------
 
 const { GoogleAuth } = require('google-auth-library');
@@ -35,6 +36,11 @@ async function logToCRM(logData) {
       console.error('Google Sheets service is not initialized.');
       return;
   }
+  
+  // *** [الإصلاح] ***
+  // تم نقل تعريف المتغير إلى هنا (خارج الـ try)
+  // تأكد أن هذا الاسم يطابق 100% اسم التاب في ملفك
+  const sheetName = 'eSelect CRM Log'; 
 
   // الأعمدة كما في الخطة:
   // Timestamp | Name | Phone | Message | Intent | Response | OrderNo | Language | Sentiment
@@ -51,10 +57,6 @@ async function logToCRM(logData) {
   ];
 
   try {
-    // نفترض أن اسم الشيت هو 'Sheet1' أو 'eSelect CRM Log'
-    // يجب التأكد من أن اسم الشيت في ملفك صحيح
-    const sheetName = 'eSelect CRM Log'; // يجب أن يتطابق هذا الاسم مع الشيت
-    
     await sheets.spreadsheets.values.append({
       spreadsheetId: GOOGLE_SHEETS_ID,
       range: `${sheetName}!A:I`,
@@ -67,7 +69,7 @@ async function logToCRM(logData) {
   } catch (err) {
     console.error('Error logging to Google Sheets:', err.message);
     if (err.message.includes('Unable to parse range')) {
-        console.error(`ERROR: The sheet name "${sheetName}" might be incorrect.`);
+        console.error(`ERROR: The sheet name "${sheetName}" might be incorrect. Please check your Google Sheet file.`);
     }
   }
 }
