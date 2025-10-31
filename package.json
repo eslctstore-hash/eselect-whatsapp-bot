@@ -1,19 +1,37 @@
 {
   "name": "eselect-whatsapp-bot",
-  "version": "10.0.0",
-  "description": "Elite eSelect AI WhatsApp Bot v10.0 (Full AI Vision + Whisper + CRM Integration)",
+  "version": "10.2.0",
+  "description": "AI-powered WhatsApp bot for eSelect | إي سيلكت — integrates with Ultramsg, Shopify, OpenAI (Whisper + Vision), and Google Sheets CRM.",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
- "dependencies": {
-  "axios": "^1.7.0",
-  "express": "^4.19.2",
-  "googleapis": "^140.0.1",
-  "node-cron": "^3.0.3",
-  "form-data": "^4.0.0",
-  "multer": "^1.4.5-lts.1",
-  "file-type": "^18.5.0"
-}
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@google-cloud/local-auth": "^3.0.1",
+    "axios": "^1.7.3",
+    "express": "^4.21.1",
+    "file-type": "^19.5.0",
+    "form-data": "^4.0.0",
+    "googleapis": "^142.0.0",
+    "mime-types": "^2.1.35",
+    "node-cron": "^3.0.3",
+    "openai": "^4.67.3"
+  },
+  "keywords": [
+    "whatsapp",
+    "chatbot",
+    "ultramsg",
+    "shopify",
+    "gpt",
+    "whisper",
+    "vision",
+    "eselect",
+    "oman"
+  ],
+  "author": "Salim Al Sulaimi | Elite Select SPC",
+  "license": "ISC"
 }
