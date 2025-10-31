@@ -11,7 +11,6 @@ import fs from "fs";
 import path from "path";
 import { google } from "googleapis";
 import { fileURLToPath } from "url";
-import { GoogleSpreadsheet } from "@google-cloud/sheets";
 import OpenAI from "openai";
 import cron from "node-cron";
 
