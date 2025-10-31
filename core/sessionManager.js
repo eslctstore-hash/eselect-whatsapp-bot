@@ -1,6 +1,6 @@
 // core/sessionManager.js
 // ----------------------------------------------------------------
-// (ملف جديد) ذاكرة البوت لإدارة حالة المحادثة
+// (إصلاح) تم إصلاح خطأ مطبعي (SyntaxError) في 'function getState'
 // ----------------------------------------------------------------
 
 // سيتم فقدان هذه الذاكرة عند إعادة تشغيل السيرفر
@@ -23,7 +23,8 @@ function setState(from, state, context = {}) {
  * @param {string} from - رقم العميل
  * @returns {object | null} - الحالة الحالية أو null
  */
-functiongetState(from) {
+// [** الإصلاح **] تمت إضافة مسافة هنا
+function getState(from) {
   const session = userSessions.get(from);
   if (!session) {
     return null;
