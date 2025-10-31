@@ -1,6 +1,6 @@
 // core/googleDrive.js
 // ----------------------------------------------------------------
-// وحدة رفع ملفات الصوت (TTS) إلى Google Drive وجعلها عامة
+// (إصلاح) تم تحديث الكود للتعامل مع الـ Shared Drives
 // ----------------------------------------------------------------
 
 const { google } = require('googleapis');
@@ -19,15 +19,15 @@ const auth = new google.auth.GoogleAuth({
 const drive = google.drive({ version: 'v3', auth });
 
 /**
- * رفع ملف صوتي وجعله قابلاً للقراءة للجميع
- * @param {string} filePath - المسار المحلي للملف (e.g., /public/temp_123.mp3)
+ * رفع ملف صوتي وجعله قابلاً للقراءة للجميع (للعمل مع Shared Drive)
+ * @param {string} filePath - المسار المحلي للملف
  * @returns {Promise<string>} - رابط التنزيل المباشر للملف
  */
 async function uploadAudioAndGetLink(filePath) {
   const fileName = path.basename(filePath);
 
   try {
-    // 1. رفع الملف
+    // 1. رفع الملف إلى المجلد المحدد
     const file = await drive.files.create({
       media: {
         mimeType: 'audio/mpeg',
@@ -35,28 +35,32 @@ async function uploadAudioAndGetLink(filePath) {
       },
       requestBody: {
         name: fileName,
-        parents: [GOOGLE_DRIVE_FOLDER_ID],
+        parents: [GOOGLE_DRIVE_FOLDER_ID], // هذا هو ID المجلد داخل الـ Shared Drive
       },
-      fields: 'id, webViewLink',
+      fields: 'id, webViewLink, webContentLink',
+      // [** إصلاح Shared Drive **]
+      supportsAllDrives: true,
     });
 
     const fileId = file.data.id;
     console.log(`File uploaded to Drive with ID: ${fileId}`);
 
-    // 2. جعل الملف عاماً (للقراءة فقط)
+    // 2. جعل الملف عاماً (للقراءة فقط) داخل الـ Shared Drive
     await drive.permissions.create({
       fileId: fileId,
       requestBody: {
         role: 'reader',
         type: 'anyone',
       },
+      // [** إصلاح Shared Drive **]
+      supportsAllDrives: true,
     });
 
     // 3. حذف الملف المؤقت من السيرفر
     fs.unlinkSync(filePath);
     console.log(`Deleted temporary file: ${filePath}`);
 
-    // 4. إرجاع رابط العرض (ليس رابط تنزيل مباشر، ولكنه يعمل للمشاركة)
+    // 4. إرجاع رابط العرض
     return file.data.webViewLink;
 
   } catch (error) {
@@ -65,7 +69,7 @@ async function uploadAudioAndGetLink(filePath) {
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
-    return null;
+    return null; // إرجاع null كما في السجلات السابقة
   }
 }
 
