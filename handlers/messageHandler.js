@@ -1,6 +1,7 @@
 // handlers/messageHandler.js
 // ----------------------------------------------------------------
-// العقل المدبر: ينسق جميع العمليات من استلام الرسالة حتى الرد
+// (إصلاح 1): تمت إضافة فلتر للـ event_type و fromMe لإيقاف الحلقة اللانهائية
+// (إصلاح 2): تمت إضافة دعم لـ "ptt" (الرسائل الصوتية)
 // ----------------------------------------------------------------
 
 const ultramsg = require('../core/ultramsg');
@@ -14,21 +15,23 @@ const tts = require('../ai/tts');
 const drive = require('../core/googleDrive');
 
 async function handleWebhook(payload) {
-  // تجاهل الرسائل التي نرسلها نحن (حالة "sent")
-  if (payload.status === 'sent') {
+  // ----------------------------------------------------------------
+  // [** إصلاح الحلقة اللانهائية **]
+  // 1. تجاهل أي شيء ليس رسالة مستلمة جديدة
+  if (payload.event_type !== 'message_received') {
+    return; // نتجاهل إشعارات "message_create" و "message_ack"
+  }
+  // 2. تجاهل الرسائل الصادرة من البوت نفسه (احتياطي)
+  if (!payload.data || payload.data.fromMe) {
     return;
   }
+  // ----------------------------------------------------------------
 
   // استخراج البيانات الأساسية من رسالة Ultramsg
   const messageData = payload.data;
-  if (!messageData) {
-    console.log('No data found in webhook payload.');
-    return;
-  }
-
   const from = messageData.from; // رقم العميل
   const name = messageData.pushname; // اسم العميل
-  const type = messageData.type; // نوع الرسالة (chat, image, voice)
+  const type = messageData.type; // نوع الرسالة (chat, image, ptt)
   const body = messageData.body; // محتوى الرسالة النصية
   const mediaUrl = messageData.media; // رابط الصورة أو الصوت
 
@@ -43,16 +46,30 @@ async function handleWebhook(payload) {
 
     // 2. تحليل الوسائط (المرحلة 2)
     if (type === 'image') {
-      console.log('Analyzing image...');
-      textInput = await vision.analyzeImage(mediaUrl);
-      console.log('Vision Analysis:', textInput);
-      intent = 'Product (Vision)';
-    } else if (type === 'voice') {
-      console.log('Transcribing audio...');
-      textInput = await audio.transcribeAudio(mediaUrl);
-      console.log('Whisper Transcription:', textInput);
-      intent = 'Product (Voice)';
-    } else if (type === 'chat' && (body.includes('http://') || body.includes('https://'))) {
+      if (!mediaUrl) {
+        console.log('Image message received, but media URL is empty.');
+        textInput = 'صورة (خطأ في الرابط)';
+      } else {
+        console.log('Analyzing image...');
+        textInput = await vision.analyzeImage(mediaUrl);
+        console.log('Vision Analysis (Keywords):', textInput);
+        intent = 'Product (Vision)';
+      }
+    } 
+    // [** إصلاح الرسائل الصوتية **]
+    // Ultramsg يرسل "ptt" وليس "voice"
+    else if (type === 'voice' || type === 'ptt') { 
+      if (!mediaUrl) {
+         console.log('Audio message received, but media URL is empty.');
+         textInput = 'صوت (خطأ في الرابط)';
+      } else {
+        console.log('Transcribing audio (ptt)...');
+        textInput = await audio.transcribeAudio(mediaUrl);
+        console.log('Whisper Transcription:', textInput);
+        intent = 'Product (Voice)';
+      }
+    } 
+    else if (type === 'chat' && (body.includes('http://') || body.includes('https://'))) {
         if (body.includes('facebook.com') || body.includes('instagram.com')) {
             intent = 'Social Media Link';
         } else {
@@ -62,6 +79,7 @@ async function handleWebhook(payload) {
     }
 
     // 3. فهم نية العميل (المرحلة 3)
+    // (نقوم بتصنيف النية فقط إذا لم تكن صورة أو صوت)
     if (type === 'chat') {
         intent = await intentEngine.getIntent(textInput);
         console.log(`Intent classified as: ${intent}`);
@@ -112,7 +130,7 @@ async function handleWebhook(payload) {
 
     // 5. إرسال الرد
     // هل العميل يريد رداً صوتياً؟ (بناءً على المرحلة 2)
-    if (type === 'voice') {
+    if (type === 'voice' || type === 'ptt') {
       console.log('Generating TTS response...');
       // ملاحظتك التقنية: توليد صوت -> رفع لـ Drive -> إرسال رابط
       const tempAudioPath = await tts.generateTTS(responseText);
