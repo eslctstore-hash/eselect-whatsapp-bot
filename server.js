@@ -10,7 +10,7 @@ import fs from "fs";
 import stream from "stream";
 import FormData from "form-data";
 import multer from "multer";
-import fileType from "file-type";
+import * as fileType from "file-type";
 import { google } from "googleapis";
 
 const app = express();
