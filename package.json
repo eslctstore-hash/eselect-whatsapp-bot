@@ -1,7 +1,7 @@
 {
   "name": "eselect-whatsapp-bot",
-  "version": "3.0.0",
-  "description": "WhatsApp chatbot for eSelect store using Ultramsg, Shopify, and ChatGPT with Google Drive integration",
+  "version": "10.0.0",
+  "description": "Elite eSelect AI WhatsApp Bot v10.0 (Full AI Vision + Whisper + CRM Integration)",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -11,6 +11,11 @@
     "axios": "^1.7.0",
     "express": "^4.19.2",
     "googleapis": "^140.0.1",
-    "node-cron": "^3.0.3"
+    "@google-cloud/sheets": "^8.0.0",
+    "node-cron": "^3.0.3",
+    "form-data": "^4.0.0",
+    "openai": "^4.56.0",
+    "node-fetch": "^3.3.2",
+    "fs-extra": "^11.2.0"
   }
 }
