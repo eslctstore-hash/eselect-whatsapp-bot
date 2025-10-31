@@ -1,6 +1,6 @@
 // ai/intentEngine.js
 // ----------------------------------------------------------------
-// (تحديث احترافي) أصبح المحرك يعيد JSON بدلاً من كلمة واحدة
+// (تحديث V3.0) إضافة نية 'GeneralProductInquiry'
 // ----------------------------------------------------------------
 
 const { OpenAI } = require('openai');
@@ -15,7 +15,8 @@ const SYSTEM_PROMPT = `
 
 الفئات المسموحة للـ "intent" هي:
 - "OrderInquiry": يسأل عن طلب (e.g., "متى يوصل طلبي", "أعطني تفاصيل طلب 1145").
-- "ProductInquiry": يسأل عن منتج (e.g., "عندكم شاحن", "كم سعر هذا", "ما هي المنتجات المتوفرة").
+- "ProductInquiry": يسأل عن منتج معين (e.g., "عندكم شاحن ايفون", "كم سعر هذا").
+- "GeneralProductInquiry": (مهم) يسأل عن المنتجات بشكل عام (e.g., "ويش متوفر عندكم", "ما هي منتجاتكم", "اقصد منتجات").
 - "Complaint": شكوى (e.g., "المنتج تالف", "الخدمة سيئة").
 - "PromotionInquiry": يسأل عن عروض.
 - "GeneralGreeting": ترحيب أو استفسار عام (e.g., "مرحبا", "السلام عليكم").
@@ -29,8 +30,8 @@ const SYSTEM_PROMPT = `
 أمثلة على المخرجات:
 - User: "متى يوصل طلبي 1145؟" -> {"intent": "OrderInquiry", "entities": {"order_number": "1145"}}
 - User: "عندكم شواحن ايفون؟" -> {"intent": "ProductInquiry", "entities": {"product_name": "شاحن ايفون"}}
+- User: "ويش تبيعون؟" -> {"intent": "GeneralProductInquiry", "entities": {}}
 - User: "السلام عليكم" -> {"intent": "GeneralGreeting", "entities": {}}
-- User: "شفت هذا المنشور عندكم https://instagram.com/p/..." -> {"intent": "LinkInquiry", "entities": {"link_url": "https://instagram.com/p/..."}}
 
 قم بالرد بملف JSON فقط.
 `;
@@ -53,7 +54,7 @@ async function analyzeIntent(message) {
     });
 
     const result = JSON.parse(response.choices[0].message.content);
-    console.log('[IntentEngine] Analysis result:', result);
+    console.log('[IntentEngine V3] Analysis result:', result);
     return result;
 
   } catch (error) {
